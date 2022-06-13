@@ -1,0 +1,87 @@
+---
+title: "Data_formatting"
+author: "Christopher Rounds"
+date: "3/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readxl) 
+library(lubridate)
+
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    # I prefer straight data frames
+    # but if you like tidyverse tibbles (the default with read_excel)
+    # then just pass tibble = TRUE
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if (!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
+site_covariate_data <- read_excel_allsheets("./data/field_data/Activity_1_eDNA_Field_Data_2021.xlsx")
+profiles <- site_covariate_data$Temp_DO_Profiles
+
+```
+
+```{r}
+covariate_data <- profiles %>%
+  dplyr::select("Date", "Lake", "Visit #", "UID", "Depth_m", "Temp_C", 
+         "DO_mgL", "cond", "pH", "Clarity_m") %>%
+  mutate(Date = as.Date(Date),
+         Lake = as.factor(Lake)) %>%
+  rename("visit_number" = "Visit #") %>%
+  group_by(UID) %>%
+  mutate(max_depth = max(Depth_m))
+
+covariate_data %>%
+  group_by(Lake) %>%
+  count(visit_number) %>%
+  summarise(n = n()) 
+# every lake should have 5 observations corresponding to a sampling event
+```
+
+
+
+```{r lake_visit}
+# probably the worst code I have ever wrote so apologies, for the life of me I couldn't figure out a tidy way to do this. What I am doing is looking at the temperature profile from each lake visit to see if there is at least a 2 deg C difference in temperature. If there is a 2 deg C difference in temp, stratified is classified as TRUE and the depth where the difference occurs is recorded.
+
+stratify_zm <- data.frame("UID" = character(1), "stratified" = character(1), "strat_zm" = numeric(1))
+sites <- unique(covariate_data$UID)
+max_depth <- 0; i <- 1; temp_site <- covariate_data$UID[1]; surface_temp <- covariate_data$Temp_C[1]
+stratified = FALSE
+for (row in 1:nrow(covariate_data)) {
+  if (temp_site != covariate_data$UID[row]) {
+    stratify_zm[i,1] <- temp_site
+    stratify_zm[i,2] <- stratified
+    stratify_zm[i,3] <- max_depth
+    i <- i + 1
+    surface_temp <- covariate_data$Temp_C[row]
+    temp_site <- covariate_data$UID[row]
+    stratified = FALSE
+  } 
+  else {
+    if (stratified == FALSE) {
+      bottom_temp <- covariate_data$Temp_C[row]
+      max_depth <- covariate_data$Depth_m[row]
+      stratified <- if_else(surface_temp - bottom_temp > 2, "TRUE", "FALSE")
+    }
+    if (row == nrow(covariate_data)) {
+      stratify_zm[i,1] <- temp_site
+      stratify_zm[i,2] <- if_else(surface_temp - bottom_temp > 2, "TRUE", "FALSE")
+      stratify_zm[i,3] <- max_depth
+    }
+  }
+}
+stratify_zm %>% slice(3:8) %>% gt::gt()
+clean_covariates <- merge(covariate_data, stratify_zm, by = "UID")
+
+# This is the data frame with one column per lake sample visit we lose some information (temperature at depth) but has most data.
+clean_covariates <- clean_covariates %>% dplyr::filter(Depth_m == 0)
+```
+
+```{r}
+lake_covs <- site_covariate_data$Lakes
+```
+
