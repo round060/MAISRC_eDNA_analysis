@@ -23,6 +23,7 @@ library(readxl)
 library(ggplot2)
 library(drc)
 
+options(scipen = 999)
 ```
 
 # LOD_LOQ Function
@@ -509,6 +510,7 @@ write("rep5.LOD: The effective limit of detection if analyzing in 5 replicates."
 write("rep8.LOD: The effective limit of detection if analyzing in 8 replicates.\n\n",file="Analysis Log.txt",append=TRUE)
 #write.csv(DAT3,file="Assay summary.csv",row.names=FALSE)
 write.csv(DAT3,paste0(format(Sys.time(), "%d-%b-%Y %H.%M"),".csv"))
+return(DAT3)
 } # ACK = close of function 
 
 # ACK = Below are all plots this script can generate. Turn on and Off as needed.
@@ -709,7 +711,7 @@ results <- list() # Initializing an empty list
 
 for (filename in filenames) {
   # Read StepOne Plus excel file
-  a <- read_xls(paste0("./data/pcr_data/", filename))
+  a <- suppressMessages(read_xls(paste0("./data/pcr_data/", filename)))
   
   # Rename columns. target, cq and sq should not be changed. These names are needed for the LOD/LOQ script to run.
   colnames(a) <- c("uid", "target", "task", "cq", "ct_mean", 
@@ -719,8 +721,9 @@ for (filename in filenames) {
   a = a[8:103,]  # Remove unwanted rows (top rows with file name, time or run, etc.)
   
   # Add presence absence column where presence = detection (cq) of any value, absence = not detection value (undetermined)
-  a <- a %>% 
-    mutate(pres_abs = ifelse(a$cq == "Undetermined", "0", "1")) 
+  
+  
+  a <- a %>% mutate(pres_abs = ifelse(a$cq == "Undetermined", "0", "1")) 
   
   # Change vector type of all columns from "character" to appropriate type.
   a$cq <- as.numeric(a$cq) # You can ignore this warning. This will replace "undetermined" with "NA". This is acceptable as no data is lost and interpretation is the same. 
@@ -732,19 +735,19 @@ for (filename in filenames) {
   a$pres_abs <- as.numeric(a$pres_abs)
   
   ## Add LOD and LOQ columns ##
-  
+  '
   # Fist make a data frame of only the data needed to run the LOD/LOQ function
-  #b <- as.data.frame(a %>% # make data from from object "a"
-  #      filter(task == "STANDARD")) # only add in standard rows
-  #b = b[ , c(2,4,7)] # remove unwanted column (keep target, cq and sq)
+  b <- as.data.frame(a %>% # make data from from object "a"
+        filter(task == "STANDARD")) # only add in standard rows
+  b = b[ , c(2,4,7)] # remove unwanted column (keep target, cq and sq)
   
   # Pass object "b" into the LOD_LOQ function/script and calculate the LOD_LOQ for this data set
-  #lod_loq_calc(b)
+  lod_loq_calc(b)
   
   # Pull results from LOD_LOQ function/script and add back into object "a" as new columns
-  #a = cbind(a, LOD = DAT3$LOD)
-  #a = cbind(a, LOQ = DAT3$LOQ)
-  
+  a = cbind(a, LOD = DAT3$LOD)
+  a = cbind(a, LOQ = DAT3$LOQ)
+  '
   # Rename file and add to empty list
   results[[filename]] <- a  
   
@@ -753,7 +756,6 @@ for (filename in filenames) {
   #rm("b")
 }
 ```
-*** Need to add in replicate column still. Will add that in the above section when I have time. For now I did it manually as there are only a few data sets. This will get more difficult the more data that is added.~~~~
 
 
 Merge all data generated from the data wrangling into one data frame. This will make it easier to manipulate the data for downstream analysis.
@@ -775,6 +777,8 @@ df_eDNA <- df_eDNA %>%
   filter(task == "UNKNOWN", uid != "NA") #Remove standards and plate blanks
 df_eDNA = df_eDNA[ , c(1,2,7:10)] #Remove unwanted columns
 
+df_eDNA$replicate <- rep(c("pcr_1", "pcr_2", "pcr_3"))
+
 #view(df_eDNA)
 ```
 
@@ -783,7 +787,6 @@ Save this data as a csv
 ```{r writecsv}
 write.csv(df_eDNA, 
           paste0("./data/", format(Sys.time(), "%d-%b-%Y"),
-                 "_qPCR_activity_one_results.csv"),
-          row.names = FALSE)
+                 "_qPCR_activity_one_results.csv"), row.names = FALSE)
 ```
 

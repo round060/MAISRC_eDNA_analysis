@@ -1,0 +1,65 @@
+---
+title: "EDA"
+author: "Christopher Rounds"
+date: "6/17/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+```
+
+
+
+```{r cars}
+lakesitecovariates %>% 
+  mutate(ZM = as.logical(ZM)) %>%
+  ggplot(aes(x = ZM, y = Clarity_m)) + 
+  geom_boxplot()
+
+
+lakesitecovariates %>% 
+  mutate(ZM = as.logical(ZM), 
+         Clarity_m = as.numeric(Clarity_m)) %>%
+  ggplot(aes(x = ZM, y = Clarity_m)) + 
+  geom_boxplot()
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+profiles %>%
+  rename("visit" = "Visit #") %>%
+  mutate('visit' = as.factor(visit),
+         Lake = as.factor(Lake)) %>%
+  ggplot() +
+  geom_line(aes(x = Temp_C, y = -1*Depth_m, color = Lake)) + 
+  facet_wrap(~visit, scales='free') +
+  ylab("Depth (m)") +
+  xlab("Temperature (C)")
+```
+
+```{r}
+lakesitecovariates %>%
+  ggplot() +
+  geom_boxplot(aes(x = visit_number, y = Clarity_m))
+
+
+lakesitecovariates %>%
+  ggplot() +
+  geom_line(aes(x = Date, y = Clarity_m, color = Lake)) +
+  scale_x_date(date_breaks="1 month", date_labels="%b")
+```
+
+```{r}
+temp_carp <- all_data_pcr %>% 
+  dplyr::filter(CC == 1) %>%
+  dplyr::filter(!grepl('00|111|211|311|411|511|5011|12', uid))
+
+filter_carp <- temp_carp %>% group_by(Lake, visit_number) %>%
+  summarise(mean_pos = mean(pres_abs), n())
+
+```
+

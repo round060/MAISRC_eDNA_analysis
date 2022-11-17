@@ -5,15 +5,18 @@ date: "3/15/2022"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
+```{r setup, include=FALSE, message =FALSE}
 library(tidyverse)
+library(ggplot2)
 library(readxl) 
 library(lubridate)
+library(eDNAoccupancy)
+library(wesanderson)
+library(gt)
+library(randomForest)
+options(scipen = 999)
 
 read_excel_allsheets <- function(filename, tibble = FALSE) {
-    # I prefer straight data frames
-    # but if you like tidyverse tibbles (the default with read_excel)
-    # then just pass tibble = TRUE
     sheets <- readxl::excel_sheets(filename)
     x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
     if (!tibble) x <- lapply(x, as.data.frame)
@@ -21,11 +24,17 @@ read_excel_allsheets <- function(filename, tibble = FALSE) {
     x
 }
 site_covariate_data <- read_excel_allsheets("./data/field_data/Activity_1_eDNA_Field_Data_2021.xlsx")
-profiles <- site_covariate_data$Temp_DO_Profiles
+
+profiles <- site_covariate_data$Temp_DO_Profiles #contains profiles
+sample_data <- site_covariate_data$A1_Samples #contains sample covariate data
+physical <- site_covariate_data$Lakes #contains lake physical data (site level)
+
+qpcr_data <- read.csv("./data/14-Nov-2022_qPCR_activity_one_results.csv") #qPCR data
 
 ```
 
-```{r}
+
+```{r profile.data.cleaning}
 covariate_data <- profiles %>%
   dplyr::select("Date", "Lake", "Visit #", "UID", "Depth_m", "Temp_C", 
          "DO_mgL", "cond", "pH", "Clarity_m") %>%
@@ -38,7 +47,7 @@ covariate_data <- profiles %>%
 covariate_data %>%
   group_by(Lake) %>%
   count(visit_number) %>%
-  summarise(n = n()) 
+  summarise(n = n())
 # every lake should have 5 observations corresponding to a sampling event
 ```
 
@@ -77,11 +86,644 @@ for (row in 1:nrow(covariate_data)) {
 stratify_zm %>% slice(3:8) %>% gt::gt()
 clean_covariates <- merge(covariate_data, stratify_zm, by = "UID")
 
-# This is the data frame with one column per lake sample visit we lose some information (temperature at depth) but has most data.
-clean_covariates <- clean_covariates %>% dplyr::filter(Depth_m == 0)
+# This is the data frame with one column per lake sample visit, we lose some information (temperature/DO at depth) but has most data.
+clean_covariates <- clean_covariates %>% dplyr::filter(Depth_m == 0) %>% dplyr::select(-max_depth)
+
+rm(stratify_zm); rm(covariate_data)
+```
+
+```{r mean_depth}
+'# Takes in hypsography data and calulates mean depth
+
+depth_files <- list.files("./data/hypsography/", pattern = "*.csv")
+df_list <- sapply(paste0("./data/hypsography/" ,depth_files), read_csv, simplify = FALSE)
+attr(df_list, "names") <- depth_files
+
+depth_df <- bind_rows(df_list, .id = "df_list")
+depth_df$depths = depth_df$depths * .3048
+mean_depth_df <- data.frame(ID = character(), mean_depth = numeric())
+for (i in 1:length(unique(depth_df$df_list))){
+  print(i)
+  temp <- depth_df %>% dplyr::filter(df_list == unique(depth_df$df_list)[i])
+  volume <- MESS::auc(temp$areas, temp$depths, type = "spline")
+  mean_depth = as.numeric(volume/temp[1,3])
+  mean_depth_df[i, ] = c(temp[1,1], mean_depth*3.28)
+}
+
+# outputs a df with mean_depth '
+```
+
+```{r lake, warning = FALSE}
+# merges the profile/WQ data with the lake physical data
+
+lakesitecovariates <- merge(physical, clean_covariates)
+lakesitecovariates <- lakesitecovariates %>%
+  mutate(Lake = as.factor(Lake),
+         visit_number = as.factor(visit_number),
+         DOW = as.factor(DOW),
+         mean_depth_ft = as.numeric(mean_depth_ft),
+         UID = as.factor(UID),
+         cond = as.numeric(cond),
+         pH = as.numeric(pH),
+         Clarity_m = as.numeric(Clarity_m))
+```
+
+```{r mergeqpcr}
+# removes/changes some things with PCR data and merges it with covariate data
+field_lab_blanks <- qpcr_data %>% 
+  mutate(visit_number = substr(str_extract(uid, "[0-9]+"), 1, 1),
+         visit_site = as.numeric(substr(str_extract(uid, "[0-9]+"), 2, 4)),
+         Code = str_extract(uid, "[aA-zZ]+"),
+         row = str_c(Code, visit_number, target)) %>%
+  dplyr::filter(Code != "SLEX") %>%
+  dplyr::filter(visit_site == 0 | visit_site == 11 | visit_site == 12) %>%
+  dplyr::filter(sq_mean > .5) %>%
+  #dplyr::filter(visit_site == 0 | visit_site == 12) %>%
+  distinct(Code, visit_number, target, .keep_all = T)
+
+subset_qpcr_data <- qpcr_data %>%
+  mutate(visit_number = substr(str_extract(uid, "[0-9]+"), 1, 1),
+         visit_site = as.numeric(substr(str_extract(uid, "[0-9]+"), 2, 4)),
+         Code = str_extract(uid, "[aA-zZ]+")) %>%
+  dplyr::filter(Code != "PKEX", Code != "SLEX") %>%
+  dplyr::filter(visit_site > 0, visit_site < 11)
+
+all_data_pcr <- merge(subset_qpcr_data, lakesitecovariates, by = c("Code", "visit_number"), all.x = T)
+
+finishedpcr <- all_data_pcr %>% distinct(visit_number, Code, target) %>%
+  count(Code) #How many lake-visits do we have qpcr data for?
+```
+
+# Format data for eDNAoccupancy R package modeling
+```{r formatting}
+
+#all_data_pcr <- all_data_pcr[-c(662, 689, 688),] #removes unsatisfactory CLR404
+
+detection_data <- all_data_pcr %>%
+  mutate(sq = ifelse(is.na(sq), 0, sq),
+         sq_mean = ifelse(is.na(sq_mean), 0, sq_mean),
+         pres_abs = ifelse(sq > 1, 1, 0)) %>%
+  dplyr::select(!c("sq", "sq_mean", "sq_sd", "UID", "Notes", "Depth_m", "Team", "County")) %>% 
+  # removes copy number and unneeded stuff
+  mutate(site = as.factor(paste0(Code, "_", visit_number)),
+         sample = as.numeric(substr(str_extract(uid, "[0-9]+"), 2, 3)),
+         row = str_c(Code, visit_number, target)) %>%
+  pivot_wider(names_from = replicate, values_from = pres_abs) %>% 
+  rename(UID = "uid")
+
+#sample level covariates. Launch, Deep point, depth etc
+eDNAsample_data <- sample_data %>% 
+  filter(Type == "eDNA") %>%
+  mutate(deep = ifelse(deep == "Yes", T, F),
+         launch = ifelse(launch == "Yes", T, F),
+         nearshore = ifelse(Habitat == "Nearshore", T, F),
+         depth_m = as.numeric(depth_m)) %>%
+  dplyr::select(UID, nearshore, deep, launch, depth_m) 
+
+
+detection_data <- merge(eDNAsample_data, detection_data)
+
+detection_data <- detection_data %>% relocate(UID, sample, visit_number, target, pcr_1, pcr_2,pcr_3)
+
+temp <- detection_data %>% distinct(Date, Code,  .keep_all = T)
+
+rm(all_data_pcr); rm(eDNAsample_data)
+rm(subset_qpcr_data);rm(lakesitecovariates)
+```
+
+
+#plots to show contamination
+```{r contamination}
+contamination <- detection_data %>%
+  mutate(contaminated = as.factor(ifelse(row %in% field_lab_blanks$row, 1, 0)))
+
+contamination <- contamination %>%
+  rowwise() %>%
+  mutate(numdetection = sum(c_across(pcr_1:pcr_3)),
+         numdetection = ifelse(numdetection == 0, 0, 1),
+         mixed_to_bottom = ifelse(depth_m < strat_zm, TRUE, FALSE),
+         julian_day = yday(Date),
+         visit_site = as.factor(visit_site),
+         visit_number = as.numeric(visit_number),
+         lake_site = str_c(Code, visit_site),
+         target = as.factor(target)) 
+
+contamination %>% 
+  group_by(julian_day, Lake, target) %>%
+  mutate(numdetection = as.numeric(numdetection),
+         julian_day = as.Date(julian_day, origin = as.Date("2021-01-01"))) %>%
+  #dplyr::filter(RC == 1 && target == "Crayfish") %>%
+  summarise(detections = sum(as.numeric(numdetection)), visit_number, contaminated) %>%
+  ggplot() +
+  labs(y = "Positive Detections per Lake-Visit", x = "Day of Year", title = "2021") +
+  geom_point(aes(y = detections, x = julian_day, color = contaminated), inherit.aes = F) +
+  #geom_smooth(aes(y = detections, x = julian_day)) +
+  geom_smooth(aes(y = detections, x = julian_day, color = contaminated)) +
+  facet_wrap(vars(target)) +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b") +
+  theme(plot.title = element_text(hjust = 0.5, size = 16), 
+        axis.title.x = element_text(size = 16),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 16))
+
+ggsave("./figures/detectionsWcontamWsmooth.jpg", width = 11, height = 9)
+```
+
+
+
+```{r modelWOpcr}
+library(lme4)
+library(mgcv)
+
+pres.abs.df <- contamination %>%
+  rowwise() %>%
+  mutate(numdetection = sum(c_across(pcr_1:pcr_3)),
+         numdetection = ifelse(numdetection == 0, 0, 1),
+         mixed_to_bottom = ifelse(depth_m < strat_zm, TRUE, FALSE),
+         julian_day = yday(Date),
+         visit_site = as.factor(visit_site),
+         visit_number = as.numeric(visit_number),
+         lake_site = str_c(Code, visit_site),
+         target = as.factor(target)) 
+
+pres.abs.df %>% #dplyr::filter(Code != "LEH") %>% dplyr::filter(Code != "BEN") %>%
+  group_by(julian_day, Lake, target, Clarity_m, strat_zm, pH, cond, mean_depth_ft) %>%
+  dplyr::filter(contaminated == 0) %>%
+  mutate(numdetection = as.numeric(numdetection),
+         julian_day = as.Date(julian_day, origin = as.Date("2021-01-01"))) %>%
+  #dplyr::filter(RC == 1 && target == "Crayfish") %>%
+  summarise(detections = sum(as.numeric(numdetection)), visit_number) %>%
+  ggplot() +
+  labs(y = "Positive Detections per Lake-Visit",
+       #x = "Day of Year", 
+       title = "2021") +
+  geom_point(aes(y = detections, x = strat_zm, color = Lake)) + 
+  geom_smooth(aes(y = detections, x = strat_zm)) +
+  facet_wrap(vars(target)) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b") +
+  theme(plot.title = element_text(hjust = 0.5, size = 16), 
+        axis.title.x = element_text(size = 16),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 16))
+
+
+pres.abs.df[c("depth_m", "Clarity_m", "julian_day", "area_acres", 
+              "littoral_area_acres", "max_depth_ft", "mean_depth_ft", "strat_zm")] <-
+  lapply(pres.abs.df[c("depth_m", "Clarity_m", "julian_day", "area_acres",
+                       "littoral_area_acres","max_depth_ft", "mean_depth_ft", "strat_zm")],
+         function(x) scale(x))
+
+rc = pres.abs.df %>% dplyr::filter(target == "Crayfish") %>% 
+  mutate(visit_number = as.factor(visit_number)) %>% 
+  dplyr::filter(contaminated == 0)
+
+carp = pres.abs.df %>% dplyr::filter(target == "common carp") %>% 
+  mutate(visit_number = as.factor(visit_number)) %>%
+  dplyr::filter(contaminated == 0)
+
+'rand.gam <- gam(numdetection ~ depth_m + 
+                  s(julian_day, m= 2) +
+                  s(julian_day, Lake, bs = "fs", k = 6, m = 2),
+                data = rc, method = "REML", family = nb())
+summary(rand.gam)
+plot(rand.gam)
+k.check(rand.gam)'
+
+
+
+
+rc_model <- glmer.nb(numdetection ~ poly(julian_day, degree = 2) + depth_m + area_acres +
+                       (1|visit_site/visit_number/Lake), data = rc)
+plot(rc_model)
+summary(rc_model)
+plot(effects::allEffects(rc_model))
+
+
+
+carp_model <- glmer.nb(numdetection ~ poly(julian_day, degree = 2) + depth_m + area_acres
+                       (1|visit_site/visit_number/Lake), data = carp)
+summary(carp_model)
+plot(effects::allEffects(carp_model))
+```
+
+```{r ubms}
+library(ubms)
+
+site_covs <- pres.abs.df %>% 
+  distinct(Code, visit_site, .keep_all = T) %>%
+  dplyr::select("Lake", "Code", "visit_number", "visit_site", "area_acres", 
+                "littoral_area_acres", "perimeter_miles", "max_depth_ft", "mean_depth_ft") %>%
+  mutate(lake_site = str_c(Code, visit_number))
+
+y_stack <- pres.abs.df %>%
+  dplyr::select("Code", "visit_number", "sample", "numdetection") %>%
+  group_by(Code, sample) %>%
+  pivot_wider(names_from = "visit_number", values_from = "numdetection")
+
+
+
+sample_covs_names <- c("julian_day", "Clarity_m", "Temp_C", "mixed_to_bottom", 
+                       "depth_m", "strat_zm", "lake_site")
+sample_covs <- list(); i = 1
+
+for (var in sample_covs_names) {
+  temp <- pres.abs.df %>%
+    dplyr::select("Code", "visit_number", "sample", var) %>%
+    group_by(Code, sample) %>%
+    pivot_wider(names_from = "visit_number", values_from = var)
+  sample_covs[[length(sample_covs) + 1]] = temp
+  i = i + 1
+}
+names(sample_covs) <- sample_covs_names
+
+
+umf_stack <- unmarkedFrameOccu(y = y_stack[,3:7], siteCovs = site_covs,
+                               obsCovs = list(date = sample_covs[["julian_day"]][,3:7], 
+                                              depth = sample_covs[["depth_m"]][,3:7],
+                                              clarity = sample_covs[["Clarity_m"]][,3:7],
+                                              lake_site = sample_covs[["lake_site"]][,3:7]))
+
+fit_stack <- stan_occu(~ date + (1|Code) + (1|lake_site)
+                       ~ (1|Code) + (1|lake_site), 
+                       data = umf_stack, chains = 3, iter = 2500)
+
+# diagnostics
+fit_stack
+plot(fit_stack)
+
+#M-B chi square
+(fit_stack_gof <- gof(fit_stack, quiet = TRUE))
+plot(fit_stack_gof)
+
+#trace-plot
+traceplot(fit_stack)
+
+plot_marginal(fit_stack, "det")
+
+sum_tab <- summary(fit_stack, "det")
+names(fit_stack)
+det_date <- extract(fit_stack, "beta_det[date]")[[1]]
+hist(det_date , freq=FALSE)
+lines(density(det_date ), col='red', lwd=2)
+
+
+y_stack$rowsums <- rowSums(y_stack[,c(3:7)], na.rm = TRUE)
+y_stack <- y_stack %>% 
+  ungroup() %>%
+  mutate(rowsums = ifelse(rowsums >= 1, 1, 0))
+
+sum(y_stack$rowsums)
+```
+
+
+
+
+
+
+
+```{r prepforToddscode}
+
+jags.data <- list(y = as.matrix(longform.data[,7:9]), 
+                  n.obs = nrow(longform.data),
+                  n.spp = n.spp, n.lakes = n.lakes,
+                  n.sites = n.sites, n.times = n.times, 
+                  n.reps = n.reps, occupancy = occupancy,
+                  spp = longform.data[,1], lake = longform.data[,2],
+                  time = longform.data[,3], site = longform.data[,4],
+                  depth = depth, dist_shore = dist_shore)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r tradiotnaleDNAocc}
+carpDetectionData <- detection_data %>%
+  filter(Code != "TEN" & Code != "PKE") %>%
+  #filter(CC == 1) %>%
+  dplyr::select(site, sample, pcr_1, pcr_2, pcr_3)
+
+carpSurveyData <- detection_data %>%
+  filter(Code != "TEN" & Code != "PKE") %>%
+  mutate(julian_day = yday(Date), 
+         mixed_to_bottom = ifelse(depth_m <= strat_zm, TRUE, FALSE)) %>%
+  #filter(CC == 1)%>%
+  dplyr::select(Code, site, sample, Date, area_acres, littoral_area_acres, 
+                strat_zm, DO_mgL, max_depth_ft,mean_depth_ft, Temp_C, mixed_to_bottom, 
+                cond, pH, Clarity_m, stratified, nearshore, julian_day, depth_m) 
+  
+
+#carpDetections <- occData(detection_data, siteColName = "site", sampleColName = "sample") # not working???
+
+col_list = c("pcr_1", "pcr_2", "pcr_3")
+temp <- carpDetectionData %>% 
+  rowwise() %>% 
+  mutate(hits = sum(c_across(all_of(col_list)))) %>%
+  group_by(site) %>%
+  dplyr::select(site,sample, hits) %>%
+  pivot_wider(names_from = sample, values_from = hits)
+
+
+
+y1 = as.matrix(temp[,-1])
+rownames(y1) <- temp$site
+# This is the y part of the list in occData object
+
+K <- matrix(3, nrow = nrow(y), ncol = ncol(y))
+rownames(K) <- temp$site
+colnames(K) <- 1:10
+# This is the K part of the list in occData object
+
+carpDetections <- list(y = y, K = K) #y = int, possible error?
+
+```
+
+
+```{r}
+carpSurveyData.sc <- scaleData(carpSurveyData, sampleColName = "sample")
+
+fit0 = occModel(formulaSite = ~ 1,
+               formulaSiteAndSample = ~ 1,
+               formulaReplicate = ~ 1,
+               detectionMats = carpDetections,
+               siteAndSampleData = carpSurveyData.sc,
+               niter = 5000,
+               niterInterval = 1000,
+               siteColName = 'site')
+WAIC(fit0, burnin = 500)
+
+
+fit1 = occModel(formulaSite = ~ 1,
+               formulaSiteAndSample = ~ Clarity_m + max_depth_ft + strat_zm + depth_m,
+               formulaReplicate = ~ 1,
+               detectionMats = carpDetections,
+               siteAndSampleData = carpSurveyData.sc,
+               niter = 5000,
+               niterInterval = 1000,
+               siteColName = 'site')
+posteriorPredictiveLoss(fit1, burnin = 500)
+WAIC(fit1, burnin = 500)
+posteriorSummary(fit1, burnin = 500, mcError = TRUE)
+
+?posteriorSummaryOfDetection()
+?posteriorSummaryOfSampleOccupancy
+
+psi = posteriorSummaryOfSiteOccupancy(fit1, burnin = 500)
+theta = posteriorSummaryOfSampleOccupancy(fit1, burnin = 500)
+p = posteriorSummaryOfDetection(fit1, burnin = 500)
+cc_modeled <- cbind(psi = psi$median, theta = theta$median[,1], p = p$median[,1])
+
+site.clarity <- distinct(carpSurveyData.sc, site, .keep_all = T)
+clarity <- site.clarity[,'julian_day']
+
+plot(clarity, theta$median[,1], ylim = c(0,1), xlab = "Conductivity ", ylab = "Detection Probability")
+segments(clarity, theta$lower[,1], clarity, theta$upper[,1], lwd=2)
+
+
+```
+
+Bayesian estimates of model parameters 
+                      Mean    50%   2.5%  97.5%
+beta.(Intercept)     0.442  0.440  0.014  0.892
+alpha.(Intercept)   -0.582 -0.574 -1.955  0.823
+alpha.Clarity_m      0.128  0.129  0.002  0.256
+alpha.nearshoreTRUE  0.401  0.401  0.026  0.780
+alpha.DO_mgL        -0.118 -0.118 -0.281  0.041
+alpha.max_depth_ft  -0.012 -0.012 -0.019 -0.005
+alpha.strat_zm       0.183  0.180  0.104  0.274
+delta.(Intercept)   -0.367 -0.389 -2.321  1.491
+delta.cond          -0.001 -0.001 -0.003  0.000
+delta.pH             0.105  0.103 -0.138  0.352
+
+Monte Carlo SE of Bayesian estimates 
+                      Mean    50%   2.5%  97.5%
+beta.(Intercept)    0.0045 0.0049 0.0073 0.0089
+alpha.(Intercept)   0.0204 0.0233 0.0363 0.0369
+alpha.Clarity_m     0.0017 0.0020 0.0030 0.0032
+alpha.nearshoreTRUE 0.0047 0.0053 0.0104 0.0089
+alpha.DO_mgL        0.0027 0.0030 0.0045 0.0036
+alpha.max_depth_ft  0.0001 0.0001 0.0002 0.0002
+alpha.strat_zm      0.0014 0.0014 0.0019 0.0037
+delta.(Intercept)   0.0389 0.0515 0.0940 0.0512
+delta.cond          0.0000 0.0001 0.0001 0.0001
+delta.pH            0.0056 0.0076 0.0082 0.0125
+NULL
+
+```{r revisitsites}
+ccdetectiondata <- detection_data %>%
+  filter(Code != "TEN" & Code != "PKE" & Code != "WHB") %>%
+  #filter(CC == 1) %>%
+  mutate(site = as.factor(str_c(Code, sample)),
+         visit_number = as.factor(visit_number)) %>%
+  dplyr::select(site, visit_number, pcr_1, pcr_2, pcr_3)
+
+ccsurveydata <- detection_data %>%
+  filter(Code != "TEN" & Code != "PKE" & Code != "WHB") %>%
+  mutate(julian_day = yday(Date),
+         site = as.factor(str_c(Code, sample)),
+         visit_number = as.factor(visit_number)) %>%
+  #filter(CC == 1)%>%
+  dplyr::select(site, visit_number, julian_day, Date, area_acres, littoral_area_acres, 
+                max_depth_ft, mean_depth_ft, strat_zm, DO_mgL, Temp_C, 
+                cond, pH, Clarity_m, stratified, nearshore, depth_m) 
+
+col_list = c("pcr_1", "pcr_2", "pcr_3")
+temp <- ccdetectiondata %>% 
+  rowwise() %>% 
+  mutate(hits = sum(c_across(all_of(col_list)))) %>%
+  group_by(site) %>%
+  dplyr::select(site, visit_number, hits) %>%
+  pivot_wider(names_from = visit_number, values_from = hits)
+
+y = as.matrix(temp[,-1])
+rownames(y) <- temp$site
+# This is the y part of the list in occData object
+
+K <- matrix(3, nrow = nrow(y), ncol = ncol(y))
+rownames(K) <- temp$site
+colnames(K) <- 1:5
+# This is the K part of the list in occData object
+
+ccdetections <- list(y = y, K = K) 
+# right now all data is concenerend with sites instead of lakes as above
+fit0 = occModel(formulaSite = ~ 1,
+               formulaSiteAndSample = ~ 1,
+               formulaReplicate = ~ 1,
+               detectionMats = ccdetections,
+               siteAndSampleData = ccsurveydata,
+               niter = 5000,
+               niterInterval = 1000,
+               siteColName = 'site', 
+               sampleColName = "visit_number")
+posteriorPredictiveLoss(fit0, burnin = 500)
+WAIC(fit0, burnin = 500)
+
+fit1 = occModel(formulaSite = ~ mean_depth_ft,
+               formulaSiteAndSample = ~ Clarity_m + julian_day + strat_zm + 
+                 depth_m + max_depth_ft,
+               formulaReplicate = ~ cond,
+               detectionMats = ccdetections,
+               siteAndSampleData = ccsurveydata,
+               niter = 5000,
+               niterInterval = 1000,
+               siteColName = 'site', 
+               sampleColName = "visit_number")
+posteriorPredictiveLoss(fit1, burnin = 500)
+WAIC(fit1, burnin = 500)
+posteriorSummary(fit1, burnin = 500, mcError = TRUE)
+
+psi = posteriorSummaryOfSiteOccupancy(fit1, burnin = 500)
+theta = posteriorSummaryOfSampleOccupancy(fit1, burnin = 500)
+p = posteriorSummaryOfDetection(fit1, burnin = 500)
+cc_modeled <- cbind(psi = psi$median, theta = theta$median[,1], p = p$median[,1])
+
+site.clarity <- distinct(ccsurveydata, site, .keep_all = T)
+clarity <- site.clarity[,'depth_m']
+
+plot(clarity, theta$median[,1], ylim = c(0,1), xlab = "Depth ", ylab = "Detection Probability")
+segments(clarity, theta$lower[,1], clarity, theta$upper[,1], lwd=2)
+```
+
+
+
+```{r, warning=FALSE}
+cc_modeled <- as.data.frame(cc_modeled)
+cc_modeled <- tibble::rownames_to_column(cc_modeled, "site")
+temp <- ccsurveydata %>% distinct(site, .keep_all = T)
+cc_modeled_covs <- merge(cc_modeled, temp, all.y = T)
+
+cc_modeled_covs %>%
+  ggplot(aes(x = Date, y = theta, color = Code, shape = Code)) +
+  geom_point() +
+  geom_smooth(method = "loess") +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b") 
+ggsave("./figures/timing.png")
+
+cc_modeled_covs %>%
+  ggplot(aes(x = Date, y = Clarity_m, color = Code, lty = Code))+
+  geom_point() +
+  geom_smooth(method = "loess")
+
+ cc_modeled_covs %>%
+  ggplot(aes(x = Date, y = theta)) +
+  geom_point(aes(color = Code)) +
+  geom_smooth(method = "loess") +
+  labs(y = "Detection Probability", title = "Global Carp Detection Probability") +
+  scale_x_date(date_breaks = "1 month", date_labels =  "%b") 
+ 
+ 
+cc_modeled_covs %>%
+  ggplot(aes(x = Date, y = Clarity_m, color = Code))+
+  geom_point() +
+  geom_smooth(method = "loess")
+ggsave("./figures/globaltiming.png")
 ```
 
 ```{r}
-lake_covs <- site_covariate_data$Lakes
+rf.df <- detection_data %>%
+  rowwise() %>%
+  mutate(numdetection = as.factor(sum(c_across(pcr_1:pcr_3))),
+         numdetection = as.factor(ifelse(numdetection == 0, 0, 1)),
+         mixed_to_bottom = ifelse(depth_m < strat_zm, TRUE, FALSE),
+         julian_day = yday(Date)) %>%
+  filter(Code != "TEN" & Code != "PKE")
+         
+eDNA.rf <- randomForest(numdetection ~ area_acres + littoral_area_acres + 
+                          max_depth_ft + perimeter_miles + mean_depth_ft + 
+                          Temp_C + DO_mgL + cond + pH + Clarity_m + 
+                          stratified + strat_zm + depth_m + mixed_to_bottom + julian_day, 
+                        data = rf.df, ntree = 20000, mtry = round(sqrt(16)), nodesize = 16)
+eDNA.rf
+varImpPlot(eDNA.rf)
+```
+
+```{r basic_pres_abs}
+library(lme4)
+basic_model_df <- detection_data %>%
+  dplyr::filter(Code != "TEN" & Code != "PKE") %>%
+  rowwise() %>%
+  mutate(pres_abs = ifelse(sum(c_across(pcr_1:pcr_3)) >= 1, 1, 0),
+         jd = as.numeric(yday(Date)),
+         pres_abs = as.factor(pres_abs))
+
+visit_data <- basic_model_df %>%
+  distinct(site, .keep_all = T) %>%
+  dplyr::select(-c(UID, nearshore, deep, launch, visit_site, sample, 
+                   pcr_1, pcr_2, pcr_3, pres_abs, ZM, CC, RC, SWF))
+
+visit_presence <- basic_model_df %>%
+  group_by(site) %>%
+  count(pres_abs, .drop = F) %>%
+  dplyr::filter(pres_abs == 1) 
+
+visit_df <- merge(visit_presence, visit_data)
+
+visit_df %>% ggplot() +
+  geom_point(aes(x = jd, y = n, colour = Code)) +
+  geom_line(aes(x = jd, y = n, colour = Code)) +
+  geom_smooth(aes(x = jd, y = n))
+
+rand.mod <- glmer(pres_abs ~Clarity_m + max_depth_ft + jd + (1|Lake), data = basic_model_df,
+                  family = binomial)
+summary(rand.mod)
+plot(effects::allEffects(rand.mod, partial.residuals = TRUE))
+```
+
+
+```{r crosshabitat, warning = F}
+habitat <- read.csv("./data/lake_info_Cross.csv")
+eDNA_DOW <- physical$DOW
+
+lakes <- habitat %>% filter(DOW %in% eDNA_DOW)
+
+### random plots 
+mn <- map_data("state", "Minnesota")
+physical %>%
+  rowwise() %>%
+  mutate(numAIS = as.factor(sum(c_across(ZM:RC))),
+         numAIS = fct_relevel(numAIS, "1", "2", "3")) %>%
+  ggplot() +
+  geom_polygon(data = mn, mapping = aes(x = long, y = lat, group = group),
+               color = "black", fill = "gray") +
+  geom_point(aes(x = Long, y = Lat, color = numAIS), size = 2) +
+  coord_fixed(1.3) +
+  labs(title = "Objective 1 Study Lakes", y = "Longitude", x = "Latitude", colour = "Number of AIS") +
+  scale_color_manual(values = wes_palette(n=3, name = "GrandBudapest1")) +
+  theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5)) 
+
+table <- physical %>% 
+  mutate(mean_depth_ft = as.numeric(mean_depth_ft)) %>%
+  rename(`Lake area (acres)` = area_acres,
+         `Littoral area (acres)` = littoral_area_acres,
+         `Max depth (ft)` = max_depth_ft,
+         `Mean depth (ft)` = mean_depth_ft,
+         `Lake perimeter (mi)` = perimeter_miles) %>%
+  pivot_longer(cols = `Lake area (acres)`:`Mean depth (ft)`, 
+               names_to = 'Measurement Type',
+               values_to = "measurement") %>%
+  group_by(`Measurement Type`) %>%
+  summarise(Median = median(measurement, na.rm = TRUE),
+            Mean = mean(measurement, na.rm = TRUE),
+            SD = sd(measurement, na.rm = TRUE)) %>%
+  gt() %>%
+  tab_header("Physical lake characteristics") %>%
+  fmt_number(
+    columns = 2:4,
+    decimals = 1) %>%
+  tab_source_note("Data from MN DNR")
+gtsave(table , "physical_characteristics.png")
 ```
 
