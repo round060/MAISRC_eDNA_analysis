@@ -785,8 +785,7 @@ df_eDNA$replicate <- rep(c("pcr_1", "pcr_2", "pcr_3"))
 Save this data as a csv
 
 ```{r writecsv}
-write.csv(df_eDNA, 
-          paste0("./data/", format(Sys.time(), "%d-%b-%Y"),
+write.csv(df_eDNA,paste0("./data/", format(Sys.time(), "%d-%b-%Y"),
                  "_qPCR_activity_one_results.csv"), row.names = FALSE)
 ```
 

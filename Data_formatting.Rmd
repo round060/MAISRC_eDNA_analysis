@@ -10,8 +10,6 @@ library(tidyverse)
 library(ggplot2)
 library(readxl) 
 library(lubridate)
-library(eDNAoccupancy)
-library(wesanderson)
 library(gt)
 library(randomForest)
 options(scipen = 999)
@@ -29,7 +27,7 @@ profiles <- site_covariate_data$Temp_DO_Profiles #contains profiles
 sample_data <- site_covariate_data$A1_Samples #contains sample covariate data
 physical <- site_covariate_data$Lakes #contains lake physical data (site level)
 
-qpcr_data <- read.csv("./data/14-Nov-2022_qPCR_activity_one_results.csv") #qPCR data
+qpcr_data <- read.csv("./data/05-Dec-2022_qPCR_activity_one_results.csv") #qPCR data
 
 ```
 
@@ -83,7 +81,7 @@ for (row in 1:nrow(covariate_data)) {
     }
   }
 }
-stratify_zm %>% slice(3:8) %>% gt::gt()
+#stratify_zm %>% slice(3:8) %>% gt::gt()
 clean_covariates <- merge(covariate_data, stratify_zm, by = "UID")
 
 # This is the data frame with one column per lake sample visit, we lose some information (temperature/DO at depth) but has most data.
@@ -139,7 +137,7 @@ field_lab_blanks <- qpcr_data %>%
   dplyr::filter(visit_site == 0 | visit_site == 11 | visit_site == 12) %>%
   dplyr::filter(sq_mean > .5) %>%
   #dplyr::filter(visit_site == 0 | visit_site == 12) %>%
-  distinct(Code, visit_number, target, .keep_all = T)
+  distinct(uid, target, .keep_all = T)
 
 subset_qpcr_data <- qpcr_data %>%
   mutate(visit_number = substr(str_extract(uid, "[0-9]+"), 1, 1),
@@ -148,27 +146,26 @@ subset_qpcr_data <- qpcr_data %>%
   dplyr::filter(Code != "PKEX", Code != "SLEX") %>%
   dplyr::filter(visit_site > 0, visit_site < 11)
 
-all_data_pcr <- merge(subset_qpcr_data, lakesitecovariates, by = c("Code", "visit_number"), all.x = T)
+all_data_pcr <- merge(subset_qpcr_data, lakesitecovariates, 
+                      by = c("Code", "visit_number"))
 
 finishedpcr <- all_data_pcr %>% distinct(visit_number, Code, target) %>%
   count(Code) #How many lake-visits do we have qpcr data for?
 ```
 
-# Format data for eDNAoccupancy R package modeling
+
 ```{r formatting}
-
-#all_data_pcr <- all_data_pcr[-c(662, 689, 688),] #removes unsatisfactory CLR404
-
 detection_data <- all_data_pcr %>%
   mutate(sq = ifelse(is.na(sq), 0, sq),
          sq_mean = ifelse(is.na(sq_mean), 0, sq_mean),
          pres_abs = ifelse(sq > 1, 1, 0)) %>%
-  dplyr::select(!c("sq", "sq_mean", "sq_sd", "UID", "Notes", "Depth_m", "Team", "County")) %>% 
+  dplyr::select(!c("sq", "sq_mean", "sq_sd", "UID", "Notes", "Depth_m", "Team", "County")) %>%
   # removes copy number and unneeded stuff
   mutate(site = as.factor(paste0(Code, "_", visit_number)),
          sample = as.numeric(substr(str_extract(uid, "[0-9]+"), 2, 3)),
          row = str_c(Code, visit_number, target)) %>%
   pivot_wider(names_from = replicate, values_from = pres_abs) %>% 
+  #dplyr::filter(Code != "OWA") %>%
   rename(UID = "uid")
 
 #sample level covariates. Launch, Deep point, depth etc
@@ -180,10 +177,11 @@ eDNAsample_data <- sample_data %>%
          depth_m = as.numeric(depth_m)) %>%
   dplyr::select(UID, nearshore, deep, launch, depth_m) 
 
+detection_data <- merge(eDNAsample_data, detection_data , by = "UID", all.y = T)
 
-detection_data <- merge(eDNAsample_data, detection_data)
 
-detection_data <- detection_data %>% relocate(UID, sample, visit_number, target, pcr_1, pcr_2,pcr_3)
+detection_data <- detection_data %>% 
+  relocate(UID, sample, visit_number, target, pcr_1, pcr_2,pcr_3)
 
 temp <- detection_data %>% distinct(Date, Code,  .keep_all = T)
 
@@ -192,7 +190,7 @@ rm(subset_qpcr_data);rm(lakesitecovariates)
 ```
 
 
-#plots to show contamination
+
 ```{r contamination}
 contamination <- detection_data %>%
   mutate(contaminated = as.factor(ifelse(row %in% field_lab_blanks$row, 1, 0)))
@@ -206,59 +204,51 @@ contamination <- contamination %>%
          visit_site = as.factor(visit_site),
          visit_number = as.numeric(visit_number),
          lake_site = str_c(Code, visit_site),
-         target = as.factor(target)) 
+         target = as.factor(target),
+         depth_m = log(depth_m),
+         area_acres = log(area_acres),
+         littoral_area_acres = log(littoral_area_acres)) 
 
-contamination %>% 
-  group_by(julian_day, Lake, target) %>%
+dates <- contamination$julian_day #save for later :)
+depths <- contamination$depth_m
+
+plot <- contamination
+
+contamination[c("depth_m", "Clarity_m", "julian_day", "area_acres", "pH",
+              "littoral_area_acres", "max_depth_ft", "mean_depth_ft", "strat_zm", "cond")] <-
+  lapply(contamination[c("depth_m", "Clarity_m", "julian_day", "area_acres", "pH",
+                       "littoral_area_acres","max_depth_ft", "mean_depth_ft", "strat_zm", "cond")],
+         function(x) scale(x))
+```
+
+
+# plots for exploration
+```{r}
+#which lakes have new detections
+newdetections_cc <- contamination %>%
+  dplyr::filter(CC ==0) %>%
+  dplyr::filter(numdetection > 0) %>%
+  dplyr::filter(target == "common carp") %>% 
+  dplyr::filter(!Code %in% c("VER", "SHG"))
+
+newdetections_rc <- contamination %>%
+  dplyr::filter(RC ==0) %>%
+  dplyr::filter(numdetection > 0) %>%
+  dplyr::filter(target == "Crayfish") %>% 
+  dplyr::filter(!Code %in% c()) %>%
+  dplyr::filter(contaminated == 0)
+
+plot %>% 
+  group_by(julian_day, Code, target) %>%
   mutate(numdetection = as.numeric(numdetection),
          julian_day = as.Date(julian_day, origin = as.Date("2021-01-01"))) %>%
-  #dplyr::filter(RC == 1 && target == "Crayfish") %>%
+  #dplyr::filter(target != "ZebraMussel") %>%
   summarise(detections = sum(as.numeric(numdetection)), visit_number, contaminated) %>%
   ggplot() +
   labs(y = "Positive Detections per Lake-Visit", x = "Day of Year", title = "2021") +
   geom_point(aes(y = detections, x = julian_day, color = contaminated), inherit.aes = F) +
   #geom_smooth(aes(y = detections, x = julian_day)) +
   geom_smooth(aes(y = detections, x = julian_day, color = contaminated)) +
-  facet_wrap(vars(target)) +
-  scale_x_date(date_breaks = "1 month", date_labels =  "%b") +
-  theme(plot.title = element_text(hjust = 0.5, size = 16), 
-        axis.title.x = element_text(size = 16),
-        axis.text.x = element_text(size = 14),
-        axis.title.y = element_text(size = 16))
-
-ggsave("./figures/detectionsWcontamWsmooth.jpg", width = 11, height = 9)
-```
-
-
-
-```{r modelWOpcr}
-library(lme4)
-library(mgcv)
-
-pres.abs.df <- contamination %>%
-  rowwise() %>%
-  mutate(numdetection = sum(c_across(pcr_1:pcr_3)),
-         numdetection = ifelse(numdetection == 0, 0, 1),
-         mixed_to_bottom = ifelse(depth_m < strat_zm, TRUE, FALSE),
-         julian_day = yday(Date),
-         visit_site = as.factor(visit_site),
-         visit_number = as.numeric(visit_number),
-         lake_site = str_c(Code, visit_site),
-         target = as.factor(target)) 
-
-pres.abs.df %>% #dplyr::filter(Code != "LEH") %>% dplyr::filter(Code != "BEN") %>%
-  group_by(julian_day, Lake, target, Clarity_m, strat_zm, pH, cond, mean_depth_ft) %>%
-  dplyr::filter(contaminated == 0) %>%
-  mutate(numdetection = as.numeric(numdetection),
-         julian_day = as.Date(julian_day, origin = as.Date("2021-01-01"))) %>%
-  #dplyr::filter(RC == 1 && target == "Crayfish") %>%
-  summarise(detections = sum(as.numeric(numdetection)), visit_number) %>%
-  ggplot() +
-  labs(y = "Positive Detections per Lake-Visit",
-       #x = "Day of Year", 
-       title = "2021") +
-  geom_point(aes(y = detections, x = strat_zm, color = Lake)) + 
-  geom_smooth(aes(y = detections, x = strat_zm)) +
   facet_wrap(vars(target)) +
   #scale_x_date(date_breaks = "1 month", date_labels =  "%b") +
   theme(plot.title = element_text(hjust = 0.5, size = 16), 
@@ -267,17 +257,38 @@ pres.abs.df %>% #dplyr::filter(Code != "LEH") %>% dplyr::filter(Code != "BEN") %
         axis.title.y = element_text(size = 16))
 
 
-pres.abs.df[c("depth_m", "Clarity_m", "julian_day", "area_acres", 
-              "littoral_area_acres", "max_depth_ft", "mean_depth_ft", "strat_zm")] <-
-  lapply(pres.abs.df[c("depth_m", "Clarity_m", "julian_day", "area_acres",
-                       "littoral_area_acres","max_depth_ft", "mean_depth_ft", "strat_zm")],
-         function(x) scale(x))
+plot %>% #dplyr::filter(Code != "LEH") %>% dplyr::filter(Code != "BEN") %>%
+  group_by(julian_day, Lake, target, Clarity_m, strat_zm, pH, cond, mean_depth_ft) %>%
+  #dplyr::filter(contaminated == 0) %>%
+  mutate(numdetection = as.numeric(numdetection),
+         julian_day = as.Date(julian_day, origin = as.Date("2021-01-01"))) %>%
+  dplyr::filter( target == "Crayfish") %>%
+  summarise(detections = sum(as.numeric(numdetection)), visit_number) %>%
+  ggplot() +
+  labs(y = "Positive Detections per Lake-Visit") +
+  geom_point(aes(y = detections, x = julian_day, color = Lake)) + 
+  geom_smooth(aes(y = detections, x = julian_day)) +
+  facet_wrap(vars(target)) +
+  #scale_x_date(date_breaks = "1 month", date_labels =  "%b") +
+  theme(plot.title = element_text(hjust = 0.5, size = 16), 
+        axis.title.x = element_text(size = 16),
+        axis.text.x = element_text(size = 14),
+        axis.title.y = element_text(size = 16))
 
-rc = pres.abs.df %>% dplyr::filter(target == "Crayfish") %>% 
+#ggsave("./figures/detectionsWcontamWsmooth.jpg", width = 11, height = 9)
+```
+
+
+# Start of modelling. GAMS and GLMMs
+```{r modelWOpcr}
+library(lme4)
+library(mgcv)
+
+rc = contamination %>% dplyr::filter(target == "Crayfish") %>% 
   mutate(visit_number = as.factor(visit_number)) %>% 
   dplyr::filter(contaminated == 0)
 
-carp = pres.abs.df %>% dplyr::filter(target == "common carp") %>% 
+carp = contamination %>% dplyr::filter(target == "common carp") %>% 
   mutate(visit_number = as.factor(visit_number)) %>%
   dplyr::filter(contaminated == 0)
 
@@ -290,22 +301,690 @@ plot(rand.gam)
 k.check(rand.gam)'
 
 
-
-
-rc_model <- glmer.nb(numdetection ~ poly(julian_day, degree = 2) + depth_m + area_acres +
-                       (1|visit_site/visit_number/Lake), data = rc)
+rc_model <- glmer(numdetection ~ poly(julian_day, degree = 2) +
+                       (1|Lake/sample), family = binomial, data = rc)
 plot(rc_model)
+qqnorm(residuals(rc_model))
 summary(rc_model)
-plot(effects::allEffects(rc_model))
+#plot(effects::allEffects(rc_model, residuals = T))
+plot(effects::effect("julian_day", rc_model), type = "response")
+plot(effects::effect("Clarity_m", rc_model), type = "response")
+plot(effects::effect("depth_m", rc_model), type = "response")
 
 
+plot(ranef(rc_model))
 
-carp_model <- glmer.nb(numdetection ~ poly(julian_day, degree = 2) + depth_m + area_acres
-                       (1|visit_site/visit_number/Lake), data = carp)
-summary(carp_model)
-plot(effects::allEffects(carp_model))
+
+cc_model <- glmer(numdetection ~ poly(julian_day, degree = 2) + 
+                       (1|Lake/sample), family = binomial, data = carp)
+summary(cc_model)
+plot(cc_model)
+plot(effects::allEffects(cc_model, residuals = T))
+plot(effects::effect("julian_day", cc_model), type = "response")
+plot(effects::effect("Clarity_m", cc_model),type = "response")
+plot(effects::effect("depth_m", cc_model), type = "response")
 ```
 
+# Mixed eefects RF
+```{r}
+#https://github.com/randel/MixRF
+library(MixRF)
+
+mix_RF_df <- carp %>% drop_na() %>%
+  mutate(numdetection = numdetection)
+
+X <- mix_RF_df %>% dplyr::select(depth_m,julian_day, Temp_C, pH, cond, Clarity_m, 
+                                 DO_mgL,strat_zm, stratified,area_acres,
+                                 littoral_area_acres, max_depth_ft)
+
+
+carp_mixeded <- MixRF(Y = mix_RF_df$numdetection, X = X, 
+                 random = "(1|DOW/sample)", data = mix_RF_df, 
+                 initialRandomEffects = 0, ErrorTolerance = 0.01, 
+                 MaxIterations = 100)
+
+print(carp_mixeded$forest)
+
+varImpPlot(carp_mixeded$forest)
+
+partialPlot(carp_mixeded$forest, as.data.frame(mix_RF_df), x.var = "depth_m")
+partialPlot(carp_mixeded$forest, as.data.frame(mix_RF_df), x.var = "cond")
+
+##### Rusty crayfish
+
+mix_RF_df <- rc %>% drop_na() 
+
+
+X <- mix_RF_df %>% dplyr::select(depth_m, julian_day, Temp_C, pH, cond, 
+                                 Clarity_m, DO_mgL,strat_zm, stratified, 
+                                 area_acres, littoral_area_acres, max_depth_ft)
+
+
+mixeded <- MixRF(Y = mix_RF_df$numdetection, X = X, 
+                 random = "(1|DOW/sample)", data = mix_RF_df, 
+                 initialRandomEffects = 0, ErrorTolerance = 0.1, 
+                 MaxIterations = 100)
+
+print(mixeded$forest)
+
+varImpPlot(mixeded$forest)
+
+rc_forest <- mixeded$forest
+
+partialPlot(rc_forest, as.data.frame(mix_RF_df), x.var = "depth_m")
+partialPlot(rc_forest, as.data.frame(mix_RF_df), x.var = "cond")
+
+```
+
+
+```{r stable}
+Sys.setenv(JAGS_HOME='C:/Program Files')
+library(jagsUI)
+
+# these are the lakes with all 5 PCR visits
+data4jags <- contamination %>% 
+  mutate(julian_day_2 = julian_day^2) %>%
+  dplyr::filter(
+    Code %in% c("BDG", "BEN", "CLR", "FLF", "FST", "LEH", "MIL", "OWS", "PHN", "PRO", "TEN", "WHB")) %>%
+  relocate(Code, UID, visit_number, sample, target, pcr_1, pcr_2, 
+           pcr_3, depth_m, area_acres, julian_day, julian_day_2) %>%
+  arrange(target, Code, sample, visit_number)
+
+n.lakes <- as.numeric(length(unique(data4jags$Code)))
+n.sites <- 10
+n.spp <- 2
+
+
+
+
+occupancy <- matrix(c(1,1,
+                      1,0,
+                      1,1,
+                      1,1,
+                      1,1,
+                      1,1,
+                      1,1,
+                      1,0,
+                      1,1,
+                      1,1,
+                      1,1,
+                      0,1), ncol = 2)
+
+# covraiate for depth
+depth.data <- data4jags %>% group_by(Code, visit_site) %>%
+  mutate(site_depth_m = mean(depth_m)) %>%
+  distinct(Code, visit_site, site_depth_m) %>%
+  pivot_wider(names_from = "visit_site", values_from = site_depth_m) %>%
+  remove_rownames %>% column_to_rownames(var = "Code")
+# covariate for julian day
+jd.data <- data4jags %>% group_by(Code, visit_number) %>%
+  distinct(Code, visit_number, julian_day) %>%
+  pivot_wider(names_from = "visit_number", values_from = julian_day) %>%
+  remove_rownames %>% column_to_rownames(var = "Code")
+# covariate for julian day^2
+jd2.data <- data4jags %>% group_by(Code, visit_number) %>%
+  mutate(julian_day = julian_day^2) %>%
+  distinct(Code, visit_number, julian_day) %>%
+  pivot_wider(names_from = "visit_number", values_from = julian_day) %>%
+  remove_rownames %>% column_to_rownames(var = "Code")
+
+area.acres <- data4jags %>% group_by(Code) %>%
+  dplyr::select(area_acres) %>%
+  distinct(Code, area_acres) %>%
+  pivot_wider(names_from = "Code", values_from = area_acres) 
+
+species <- data4jags %>% mutate(species = ifelse(target == "Crayfish", 1, 2)) %>%
+  dplyr::select(species)
+
+lake <- data4jags %>% ungroup() %>% mutate(lake_number =
+  case_when(
+  Code == "BDG" ~ 1, 
+  Code == "BEN" ~ 2,
+  Code == "CLR" ~ 3,
+  Code == "FLF" ~ 4,
+  Code == "FST" ~ 5,
+  Code == "LEH" ~ 6,
+  Code == "MIL" ~ 7,
+  Code == "OWS" ~ 8,
+  Code == "PHN" ~ 9,
+  Code == "PRO" ~ 10,
+  Code == "TEN" ~ 11,
+  Code == "WHB" ~ 12)) %>% dplyr::select(lake_number)
+
+jags.data.temp <- list(y = as.matrix(data4jags[,6:8]), 
+                  n.obs = nrow(data4jags),
+                  n.spp = n.spp, n.lakes = n.lakes,
+                  n.sites = 10, n.times = 5, 
+                  n.reps = 3, occupancy = occupancy,
+                  spp = as.vector(species[,1]), lake = as.matrix(lake[,1]),
+                  time = data4jags[,3], site = data4jags[,4],
+                  depth = as.matrix(depth.data), 
+                  julian_day = as.matrix(data4jags[,11]), julian_day2 = as.matrix(data4jags[,12]),
+                  jd = jd.data, jd2 = jd2.data, lake.size = area.acres)
+
+occupancy = as.matrix(occupancy)
+
+
+sink("eDNA_occ.txt")
+cat("
+model {
+# priors
+  # regression coefficients
+  
+  # SD's for simple random effects (detection: p)
+  psi.spp.sd ~ dunif(0, 1) # SD for spp effects
+  psi.spp.tau <- pow(psi.spp.sd, -2) # convert to precision
+  psi.lake.sd ~ dunif(0, 1) # SD for lake effects
+  psi.lake.tau <- pow(psi.lake.sd, -2) 
+  # sites are uniquely nested within lakes, no context as simple RE
+
+  # SDs and precision for complex random effects (all presumed spp-specific)
+  psi.spp.lake.sd ~ dunif(0, 1) # spp-lake effect
+  psi.spp.lake.tau <- pow(psi.spp.lake.sd, -2) 
+  psi.spp.lake.site.sd ~ dunif(0, 1) # SD for site effects within lakes within spp
+  psi.spp.lake.site.tau <- pow(psi.spp.lake.site.sd, -2) 
+
+# species specific priors 
+  for (i in 1:n.spp){
+    psi.spp[i] ~ dunif(0, 1) # species-specific occupancy
+    b.depth[i] ~ dnorm(0, 0.33) # vague prior for regression slope of depth
+    b.lake.size[i] ~ dnorm(0, 0.33)
+    
+    p.spp[i] ~ dnorm(0, psi.spp.tau)  # spp mean detection (logit scale)
+    a.jd[i] ~ dnorm(0, 0.33)
+    a.jd2[i] ~ dnorm(0, 0.33)
+    
+    # species-lake effect
+    for (j in 1:n.lakes){
+      psi.spp.lake[i,j] ~ dnorm(0, psi.spp.lake.tau) # lake-by-spp adjustments
+      for (s in 1:n.sites){
+        psi.spp.lake.site[i,j,s] ~ dnorm(0, psi.spp.lake.site.tau) # spp-lake-site
+      }
+    }
+  }
+
+# Ecological model for true detection (occupancy)
+
+  for (i in 1:n.spp) {
+    for (j in 1:n.lakes){
+      for (t in 1:n.times){
+        for (s in 1:n.sites){
+          logit(psi[i,j,t,s]) <- psi.spp[i] + psi.spp.lake[i,j] + psi.spp.lake.site[i,j,s] +
+            b.depth[i] * depth[j,s] + b.lake.size[i] * lake.size[,j]
+            
+        } # end site loop (i)
+      } # end time loop (t)
+    } # end spp loop (j)
+  } # end spp loop (i)
+
+# Observation model for replicated detection/nondetection observations (detection)
+
+    for (n in 1:n.obs) {
+      z[n] <- occupancy[lake[n,],spp[n,]] # is the species in the lake?
+      for (k in 1:n.reps){
+        logit(p[n, k]) <- p.spp[spp[n,]] + a.jd[spp[n,]] * julian_day[n,] + 
+                                a.jd2[spp[n,]] * julian_day2[n,]
+        
+        y[n,k] ~ dbern(z[n]*psi[spp[n,],lake[n,],time[n,],site[n,]]*(p[n, k])) 
+        
+        # is the species in the lake * which species, which lake, what time, what site
+      } # close k
+    } # close n
+    
+} # end jags model
+",fill = TRUE)  # back to R code
+sink()
+
+# Parameters monitored
+params <- c("b.depth", "b.lake.size", "a.jd", "a.jd2",
+            "p.spp", "psi.spp", "psi.spp.sd", 
+            "psi.spp.lake", "psi.lake.sd", 
+            "psi.spp.lake.sd", "psi.spp.lake.sd")
+
+na <- 1000; ni <- 20000; nt <- 3; nb <- 1000; nc <- 3 # short for test run
+#na <- 1000; ni <- 60000; nt <- 10; nb <- 10000; nc <- 3
+
+# Call JAGS from R (~44 min at 60,000 ni)
+eDNA1.out <- jags(jags.data.temp, inits = NULL, params, "eDNA_occ.txt", 
+                  n.adapt = na, n.chains = nc, n.thin = nt, 
+                  n.iter = ni, n.burnin = nb, parallel = TRUE)
+print(eDNA1.out, dig = 2)
+mcmcOutput::diagPlot(eDNA1.out)
+
+par(mfrow = c(2,2))
+# crayfish = red
+plot(density(eDNA1.out$sims.list$b.depth[,1]), xlim = c(-1,1), 
+     xlab = "Parameter estimate", main = "Depth effect")
+abline(v = eDNA1.out$mean$b.depth[1], col = "red")
+plot(density(eDNA1.out$sims.list$b.depth[,2]), xlim = c(-1,1), 
+     xlab = "Parameter estimate", main = "Depth effect")
+abline(v = eDNA1.out$mean$b.depth[2], col = "green")
+plot(density(eDNA1.out$sims.list$a.jd[,1]), xlim = c(-1,2), 
+     xlab = "Parameter estimate", main = "Julian day effect")
+abline(v = eDNA1.out$mean$a.jd[1], col = "red")
+plot(density(eDNA1.out$sims.list$a.jd[,2]), xlim = c(-1,2), 
+     xlab = "Parameter estimate", main = "Julian day effect")
+abline(v = eDNA1.out$mean$a.jd[2], col = "green")
+
+par(mfrow = c(1,2))
+plot(density(eDNA1.out$sims.list$psi.spp.lake.sd), xlim = c(0,2), 
+     xlab = "Parameter estimate", main = "Species-lake effect")
+abline(v = eDNA1.out$meanspp_lake.sd, col = "red")
+
+plot(density(eDNA1.out$sims.list$psi.lake.sd), xlim = c(0,1), 
+     xlab = "Parameter estimate", main = "Lake effect")
+abline(v = eDNA1.out$meanlake.sd, col = "red")
+
+# Detection probability for each species by lake
+plot(1:n.lakes, plogis(eDNA1.out$mean$psi.spp[1] + eDNA1.out$mean$psi.spp.lake[1,]), 
+     pch = 19, type = 'b', ylim = c(0,1), ylab = "Detection probability", 
+     xlab = "Lake number", main = "Model estimates")
+for (i in 2:n.spp){
+  points(1:n.lakes, plogis(eDNA1.out$mean$psi.spp[i] + eDNA1.out$mean$psi.spp.lake[i,]), 
+       pch = 19, type = 'b', col = i) 
+}
+
+
+
+eDNA1.out$mean$p.spp.lake.site[1,,1] # Species 1, site 1
+eDNA1.out$mean$p.spp.lake.site[1,1,] # Species 1, lake 1
+
+
+tidy.output <- data.frame(mean = numeric(), spp = numeric(), lake = numeric(), site = numeric())
+num = 1
+for (i in 1:n.spp){
+  for (j in 1:n.lakes){
+    for (k in 1:n.sites){
+      tidy.output[num,] <- data.frame(mean = eDNA1.out$mean$psi.spp.lake.site[i,j,k], spp = i, lake = j, site = k)
+      num = num + 1
+    }
+  }
+}
+
+
+tidy.output %>% 
+  mutate(prob.mean = plogis(mean), ssp = as.factor(spp), lake = as.factor(lake), site = as.factor(site)) %>%
+  ggplot(aes(x = site, y = prob.mean, color = lake, group = lake)) +
+  #geom_point() +
+  geom_line() +
+  facet_wrap(vars(spp))
+ggsave("jags.site.variability.png")
+
+
+# plot depth effect over time 
+range(contamination$depth_m, na.rm = T)
+depth_pred <- seq(1/2, 60, by = 0.5)
+log_depth_pred <- log(depth_pred)
+depth.standard <- wiqid::standardize2match(log_depth_pred, depths)
+
+depthplot <- matrix(NA, 80*n.spp, 3)
+
+depthplot <- data.frame( depth =  rep(depth_pred, n.spp),
+                     depth.standard = rep(depth.standard, n.spp), 
+                     depth.standard2 = rep(depth.standard^2, n.spp),
+                     mean = rep(NA, length(depth.standard)*2), 
+                     high = rep(NA, length(depth.standard)*2), low = rep(NA, length(depth.standard)*2), 
+                     spp = as.factor(c(rep(1, length(depth.standard)), rep(2, length(depth.standard)))))
+
+for (i in 1:nrow(depthplot)) {
+  s = depthplot[i,7]
+  # I should be adding an intercept here?
+  logit.p.tmp <- eDNA1.out$sims.list$b.depth[,s] * depthplot$depth.standard[i] + eDNA1.out$sims.list$psi.spp[,s]
+    
+    #with(eDNA1.out$sims.list, b.jd * dates.standard[i] + b.jd2 * dates.standard[i]^2)
+  p.tmp <- plogis(logit.p.tmp)
+  depthplot[i, 4] <- mean(p.tmp)
+  depthplot[i, 5:6] <- HDInterval::hdi(p.tmp)
+}
+
+depthplot %>%
+  ggplot(aes(x = depth, y = mean, color = spp)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = low, ymax = high, fill = spp), alpha = 0.2)
+#ggsave("jags.deptheffect.png")
+
+
+
+
+
+
+range(contamination$julian_day)
+dates_pred <- seq(105, 300)
+dates.standard <- wiqid::standardize2match(dates_pred, dates)
+
+jdplot <- matrix(NA, 196*n.spp, 3)
+
+jdplot <- data.frame( dates =  rep(dates_pred, n.spp),
+                     dates.standard = rep(dates.standard, n.spp), 
+                     dates.standard2 = rep(dates.standard^2, n.spp),
+                     mean = rep(NA, length(dates_pred)*2), 
+                     high = rep(NA, length(dates_pred)*2), low = rep(NA, length(dates_pred)*2), 
+                     spp = as.factor(c(rep(1, length(dates_pred)), rep(2, length(dates_pred)))))
+
+for (i in 1:nrow(jdplot)) {
+  s = jdplot[i,7]
+  # I should be adding an intercept here?
+  logit.p.tmp <- eDNA1.out$sims.list$a.jd[,s] * jdplot$dates.standard[i] + 
+      eDNA1.out$sims.list$a.jd2[,s] * jdplot$dates.standard2[i] + eDNA1.out$sims.list$p.spp[,s]
+    
+    #with(eDNA1.out$sims.list, b.jd * dates.standard[i] + b.jd2 * dates.standard[i]^2)
+  p.tmp <- plogis(logit.p.tmp)
+  jdplot[i, 4] <- mean(p.tmp)
+  jdplot[i, 5:6] <- HDInterval::hdi(p.tmp)
+}
+
+jdplot %>%
+  ggplot(aes(x = dates, y = mean, color = spp)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = low, ymax = high, fill = spp), alpha = 0.2)+
+  labs(y = "Detection probability", x = "Julian day")
+#ggsave("jags.juliandayeffect.png")
+```
+
+
+# Adding the ability to skip contaminated samples
+```{r}
+Sys.setenv(JAGS_HOME='C:/Program Files')
+library(jagsUI)
+
+# these are the lakes with all 5 PCR visits
+data4jags <- contamination %>% 
+  mutate(julian_day_2 = julian_day^2) %>%
+  dplyr::filter(
+    Code %in% c("BDG", "BEN", "CLR", "FLF", "FST", "LEH", "MIL", "OWS", "PHN", "PRO", "TEN", "WHB")) %>%
+  relocate(Code, UID, visit_number, sample, target, pcr_1, pcr_2, 
+           pcr_3, depth_m, area_acres, julian_day, julian_day_2) %>%
+  arrange(target, Code, sample, visit_number) %>%
+  dplyr::filter(contaminated != 1)
+
+# What lakes are we missing
+#MCN, JHN, SHG, ILR, VER, PKE, CRN, KAB, OWA
+
+n.lakes <- as.numeric(length(unique(data4jags$Code)))
+n.sites <- 10
+n.spp <- 2
+
+
+
+
+occupancy <- matrix(c(1,1,
+                      1,0,
+                      1,1,
+                      1,1,
+                      1,1,
+                      1,1,
+                      1,1,
+                      1,0,
+                      1,1,
+                      1,1,
+                      1,1,
+                      0,1), ncol = 2)
+
+# covraiate for depth
+depth.data <- data4jags %>% dplyr::select(depth_m)
+# covariate for julian day
+jd.data <- data4jags %>% dplyr::select(julian_day)
+# covariate for julian day^2
+jd2.data <- data4jags %>% mutate(jd2 = julian_day^2) %>% dplyr::select(jd2)
+
+area.acres <- data4jags %>% dplyr::select(area_acres)
+
+species <- data4jags %>% mutate(species = ifelse(target == "Crayfish", 1, 2)) %>%
+  dplyr::select(species)
+
+lake <- data4jags %>% ungroup() %>% mutate(lake_number =
+  case_when(
+  Code == "BDG" ~ 1, 
+  Code == "BEN" ~ 2,
+  Code == "CLR" ~ 3,
+  Code == "FLF" ~ 4,
+  Code == "FST" ~ 5,
+  Code == "LEH" ~ 6,
+  Code == "MIL" ~ 7,
+  Code == "OWS" ~ 8,
+  Code == "PHN" ~ 9,
+  Code == "PRO" ~ 10,
+  Code == "TEN" ~ 11,
+  Code == "WHB" ~ 12)) %>% dplyr::select(lake_number)
+
+jags.data.temp <- list(y = as.matrix(data4jags[,6:8]), 
+                  n.obs = nrow(data4jags),
+                  n.spp = n.spp, n.lakes = n.lakes,
+                  n.sites = 10, n.times = 5, 
+                  n.reps = 3, occupancy = occupancy,
+                  spp = as.vector(species[,1]), lake = as.matrix(lake[,1]),
+                  time = data4jags[,3], site = data4jags[,4],
+                  depth = as.matrix(depth.data), 
+                  julian_day = as.matrix(data4jags[,11]), julian_day2 = as.matrix(data4jags[,12]),
+                  jd = jd.data, jd2 = jd2.data, lake.size = area.acres)
+
+occupancy = as.matrix(occupancy)
+
+
+sink("eDNA_occ.txt")
+cat("
+model {
+# priors
+  # regression coefficients
+  
+  # SD's for simple random effects (detection: p)
+  psi.spp.sd ~ dunif(0, 1) # SD for spp effects
+  psi.spp.tau <- pow(psi.spp.sd, -2) # convert to precision
+  psi.lake.sd ~ dunif(0, 1) # SD for lake effects
+  psi.lake.tau <- pow(psi.lake.sd, -2) 
+  # sites are uniquely nested within lakes, no context as simple RE
+
+  # SDs and precision for complex random effects (all presumed spp-specific)
+  psi.spp.lake.sd ~ dunif(0, 1) # spp-lake effect
+  psi.spp.lake.tau <- pow(psi.spp.lake.sd, -2) 
+  psi.spp.lake.site.sd ~ dunif(0, 1) # SD for site effects within lakes within spp
+  psi.spp.lake.site.tau <- pow(psi.spp.lake.site.sd, -2) 
+
+# species specific priors 
+  for (i in 1:n.spp){
+    psi.spp[i] ~ dunif(0, 1) # species-specific occupancy
+    b.depth[i] ~ dnorm(0, 0.33) # vague prior for regression slope of depth
+    b.lake.size[i] ~ dnorm(0, 0.33)
+    
+    p.spp[i] ~ dnorm(0, psi.spp.tau)  # spp mean detection (logit scale)
+    a.jd[i] ~ dnorm(0, 0.33)
+    a.jd2[i] ~ dnorm(0, 0.33)
+    
+    # species-lake effect
+    for (j in 1:n.lakes){
+      psi.spp.lake[i,j] ~ dnorm(0, psi.spp.lake.tau) # lake-by-spp adjustments
+      for (s in 1:n.sites){
+        psi.spp.lake.site[i,j,s] ~ dnorm(0, psi.spp.lake.site.tau) # spp-lake-site
+      }
+    }
+  }
+
+# Ecological model for true detection (occupancy)
+
+  for (i in 1:n.obs) {
+          logit(psi[i]) <- psi.spp[spp[i,]] + psi.spp.lake[spp[i,], lake[i,]] + 
+                            psi.spp.lake.site[spp[i,], lake[i,], site[i,]] +
+                            b.depth[spp[i,]] * depth[i,] + b.lake.size[spp[i,]] * lake.size[i,]
+  } # end obs loop (i)
+
+# Observation model for replicated detection/nondetection observations (detection)
+
+    for (n in 1:n.obs) {
+      z[n] <- occupancy[lake[n,],spp[n,]] # is the species in the lake?
+      for (k in 1:n.reps){
+        logit(p[n, k]) <- p.spp[spp[n,]] + a.jd[spp[n,]] * julian_day[n,] + 
+                                a.jd2[spp[n,]] * julian_day2[n,]
+        
+        y[n,k] ~ dbern(z[n]*psi[n]*(p[n, k])) 
+        
+        # is the species in the lake * which species, which lake, what time, what site
+      } # close k
+    } # close n
+    
+} # end jags model
+",fill = TRUE)  # back to R code
+sink()
+
+# Parameters monitored
+params <- c("b.depth", "b.lake.size", "a.jd", "a.jd2",
+            "p.spp", "psi.spp", "psi.spp.sd", 
+            "psi.spp.lake", "psi.lake.sd", 
+            "psi.spp.lake.sd", "psi.spp.lake.sd")
+
+na <- 2500; ni <- 20000; nt <- 3; nb <- 2000; nc <- 3 # short for test run
+#na <- 1000; ni <- 60000; nt <- 10; nb <- 10000; nc <- 3
+
+# Call JAGS from R (~44 min at 60,000 ni)
+eDNA1.out <- jags(jags.data.temp, inits = NULL, params, "eDNA_occ.txt", 
+                  n.adapt = na, n.chains = nc, n.thin = nt, 
+                  n.iter = ni, n.burnin = nb, parallel = TRUE)
+print(eDNA1.out, dig = 2)
+mcmcOutput::diagPlot(eDNA1.out)
+
+par(mfrow = c(2,2))
+# crayfish = red
+plot(density(eDNA1.out$sims.list$b.depth[,1]), xlim = c(-1,1), 
+     xlab = "Parameter estimate", main = "Depth effect")
+abline(v = eDNA1.out$mean$b.depth[1], col = "red")
+plot(density(eDNA1.out$sims.list$b.depth[,2]), xlim = c(-1,1), 
+     xlab = "Parameter estimate", main = "Depth effect")
+abline(v = eDNA1.out$mean$b.depth[2], col = "green")
+plot(density(eDNA1.out$sims.list$a.jd[,1]), xlim = c(-1,2), 
+     xlab = "Parameter estimate", main = "Julian day effect")
+abline(v = eDNA1.out$mean$a.jd[1], col = "red")
+plot(density(eDNA1.out$sims.list$a.jd[,2]), xlim = c(-1,2), 
+     xlab = "Parameter estimate", main = "Julian day effect")
+abline(v = eDNA1.out$mean$a.jd[2], col = "green")
+
+par(mfrow = c(1,2))
+plot(density(eDNA1.out$sims.list$psi.spp.lake.sd), xlim = c(0,2), 
+     xlab = "Parameter estimate", main = "Species-lake effect")
+abline(v = eDNA1.out$meanspp_lake.sd, col = "red")
+
+plot(density(eDNA1.out$sims.list$psi.lake.sd), xlim = c(0,1), 
+     xlab = "Parameter estimate", main = "Lake effect")
+abline(v = eDNA1.out$meanlake.sd, col = "red")
+
+# Detection probability for each species by lake
+plot(1:n.lakes, plogis(eDNA1.out$mean$psi.spp[1] + eDNA1.out$mean$psi.spp.lake[1,]), 
+     pch = 19, type = 'b', ylim = c(0,1), ylab = "Detection probability", 
+     xlab = "Lake number", main = "Model estimates")
+for (i in 2:n.spp){
+  points(1:n.lakes, plogis(eDNA1.out$mean$psi.spp[i] + eDNA1.out$mean$psi.spp.lake[i,]), 
+       pch = 19, type = 'b', col = i) 
+}
+
+
+
+eDNA1.out$mean$p.spp.lake.site[1,,1] # Species 1, site 1
+eDNA1.out$mean$p.spp.lake.site[1,1,] # Species 1, lake 1
+
+
+tidy.output <- data.frame(mean = numeric(), spp = numeric(), lake = numeric(), site = numeric())
+num = 1
+for (i in 1:n.spp){
+  for (j in 1:n.lakes){
+    for (k in 1:n.sites){
+      tidy.output[num,] <- data.frame(mean = eDNA1.out$mean$psi.spp.lake.site[i,j,k], spp = i, lake = j, site = k)
+      num = num + 1
+    }
+  }
+}
+
+
+tidy.output %>% 
+  mutate(prob.mean = plogis(mean), ssp = as.factor(spp), lake = as.factor(lake), site = as.factor(site)) %>%
+  ggplot(aes(x = site, y = prob.mean, color = lake, group = lake)) +
+  #geom_point() +
+  geom_line() +
+  facet_wrap(vars(spp))
+ggsave("jags.site.variability.png")
+
+
+
+#### plot depth effect for all species #### 
+range(contamination$depth_m, na.rm = T)
+(depth_pred <- seq(1/2, 60, by = 0.5))
+log_depth_pred <- log(depth_pred)
+depth.standard <- wiqid::standardize2match(log_depth_pred, depths)
+
+depthplot <- matrix(NA, 80*n.spp, 3)
+
+depthplot <- data.frame( depth =  rep(depth_pred, n.spp),
+                     depth.standard = rep(depth.standard, n.spp), 
+                     mean = rep(NA, length(depth.standard)*2), 
+                     high = rep(NA, length(depth.standard)*2), low = rep(NA, length(depth.standard)*2), 
+                     spp = as.factor(c(rep(1, length(depth.standard)), rep(2, length(depth.standard)))))
+
+for (i in 1:nrow(depthplot)) {
+  s = depthplot[i,6]
+  # I should be adding an intercept here?
+  logit.p.tmp <- eDNA1.out$sims.list$b.depth[,s] * depthplot$depth.standard[i] + eDNA1.out$sims.list$psi.spp[,s]
+    
+    #with(eDNA1.out$sims.list, b.jd * dates.standard[i] + b.jd2 * dates.standard[i]^2)
+  p.tmp <- plogis(logit.p.tmp)
+  depthplot[i, 3] <- mean(p.tmp)
+  depthplot[i, 4:5] <- HDInterval::hdi(p.tmp)
+}
+
+depthplot %>%
+  #dplyr::filter(spp == 1) %>%
+  mutate(species = case_when(
+    spp == 1 ~ "RC",
+    spp == 2 ~ "CC"
+  )) %>%
+  ggplot(aes(x = depth, y = mean, color = species)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = low, ymax = high, fill = species), alpha = 0.2)
+#ggsave("jags.deptheffect.png")
+
+
+
+
+
+#### Plot time effect for all species #####
+range(contamination$julian_day)
+dates_pred <- seq(105, 300)
+dates.standard <- wiqid::standardize2match(dates_pred, dates)
+
+jdplot <- matrix(NA, 196*n.spp, 3)
+
+jdplot <- data.frame( dates =  rep(dates_pred, n.spp),
+                     dates.standard = rep(dates.standard, n.spp), 
+                     dates.standard2 = rep(dates.standard^2, n.spp),
+                     mean = rep(NA, length(dates_pred)*2), 
+                     high = rep(NA, length(dates_pred)*2), low = rep(NA, length(dates_pred)*2), 
+                     spp = as.factor(c(rep(1, length(dates_pred)), rep(2, length(dates_pred)))))
+
+for (i in 1:nrow(jdplot)) {
+  s = jdplot[i,7]
+  # I should be adding an intercept here?
+  logit.p.tmp <- eDNA1.out$sims.list$a.jd[,s] * jdplot$dates.standard[i] + 
+      eDNA1.out$sims.list$a.jd2[,s] * jdplot$dates.standard2[i] + eDNA1.out$sims.list$p.spp[,s]
+    
+    #with(eDNA1.out$sims.list, b.jd * dates.standard[i] + b.jd2 * dates.standard[i]^2)
+  p.tmp <- plogis(logit.p.tmp)
+  jdplot[i, 4] <- mean(p.tmp)
+  jdplot[i, 5:6] <- HDInterval::hdi(p.tmp)
+}
+
+jdplot %>%
+  mutate(species = case_when(
+    spp == 1 ~ "RC",
+    spp == 2 ~ "CC"
+  )) %>%
+  ggplot(aes(x = dates, y = mean, color = species)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = low, ymax = high, x= dates, fill = species), alpha = 0.2) +
+  labs(y = "Detection probability", x = "Julian day") +
+  guides(color="none", fill = guide_legend("Species"))
+#ggsave("jags.juliandayeffect.png")
+```
+
+
+
+
+# UBMS occupancy model
 ```{r ubms}
 library(ubms)
 
@@ -378,310 +1057,6 @@ sum(y_stack$rowsums)
 
 
 
-
-
-
-```{r prepforToddscode}
-
-jags.data <- list(y = as.matrix(longform.data[,7:9]), 
-                  n.obs = nrow(longform.data),
-                  n.spp = n.spp, n.lakes = n.lakes,
-                  n.sites = n.sites, n.times = n.times, 
-                  n.reps = n.reps, occupancy = occupancy,
-                  spp = longform.data[,1], lake = longform.data[,2],
-                  time = longform.data[,3], site = longform.data[,4],
-                  depth = depth, dist_shore = dist_shore)
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-```{r tradiotnaleDNAocc}
-carpDetectionData <- detection_data %>%
-  filter(Code != "TEN" & Code != "PKE") %>%
-  #filter(CC == 1) %>%
-  dplyr::select(site, sample, pcr_1, pcr_2, pcr_3)
-
-carpSurveyData <- detection_data %>%
-  filter(Code != "TEN" & Code != "PKE") %>%
-  mutate(julian_day = yday(Date), 
-         mixed_to_bottom = ifelse(depth_m <= strat_zm, TRUE, FALSE)) %>%
-  #filter(CC == 1)%>%
-  dplyr::select(Code, site, sample, Date, area_acres, littoral_area_acres, 
-                strat_zm, DO_mgL, max_depth_ft,mean_depth_ft, Temp_C, mixed_to_bottom, 
-                cond, pH, Clarity_m, stratified, nearshore, julian_day, depth_m) 
-  
-
-#carpDetections <- occData(detection_data, siteColName = "site", sampleColName = "sample") # not working???
-
-col_list = c("pcr_1", "pcr_2", "pcr_3")
-temp <- carpDetectionData %>% 
-  rowwise() %>% 
-  mutate(hits = sum(c_across(all_of(col_list)))) %>%
-  group_by(site) %>%
-  dplyr::select(site,sample, hits) %>%
-  pivot_wider(names_from = sample, values_from = hits)
-
-
-
-y1 = as.matrix(temp[,-1])
-rownames(y1) <- temp$site
-# This is the y part of the list in occData object
-
-K <- matrix(3, nrow = nrow(y), ncol = ncol(y))
-rownames(K) <- temp$site
-colnames(K) <- 1:10
-# This is the K part of the list in occData object
-
-carpDetections <- list(y = y, K = K) #y = int, possible error?
-
-```
-
-
-```{r}
-carpSurveyData.sc <- scaleData(carpSurveyData, sampleColName = "sample")
-
-fit0 = occModel(formulaSite = ~ 1,
-               formulaSiteAndSample = ~ 1,
-               formulaReplicate = ~ 1,
-               detectionMats = carpDetections,
-               siteAndSampleData = carpSurveyData.sc,
-               niter = 5000,
-               niterInterval = 1000,
-               siteColName = 'site')
-WAIC(fit0, burnin = 500)
-
-
-fit1 = occModel(formulaSite = ~ 1,
-               formulaSiteAndSample = ~ Clarity_m + max_depth_ft + strat_zm + depth_m,
-               formulaReplicate = ~ 1,
-               detectionMats = carpDetections,
-               siteAndSampleData = carpSurveyData.sc,
-               niter = 5000,
-               niterInterval = 1000,
-               siteColName = 'site')
-posteriorPredictiveLoss(fit1, burnin = 500)
-WAIC(fit1, burnin = 500)
-posteriorSummary(fit1, burnin = 500, mcError = TRUE)
-
-?posteriorSummaryOfDetection()
-?posteriorSummaryOfSampleOccupancy
-
-psi = posteriorSummaryOfSiteOccupancy(fit1, burnin = 500)
-theta = posteriorSummaryOfSampleOccupancy(fit1, burnin = 500)
-p = posteriorSummaryOfDetection(fit1, burnin = 500)
-cc_modeled <- cbind(psi = psi$median, theta = theta$median[,1], p = p$median[,1])
-
-site.clarity <- distinct(carpSurveyData.sc, site, .keep_all = T)
-clarity <- site.clarity[,'julian_day']
-
-plot(clarity, theta$median[,1], ylim = c(0,1), xlab = "Conductivity ", ylab = "Detection Probability")
-segments(clarity, theta$lower[,1], clarity, theta$upper[,1], lwd=2)
-
-
-```
-
-Bayesian estimates of model parameters 
-                      Mean    50%   2.5%  97.5%
-beta.(Intercept)     0.442  0.440  0.014  0.892
-alpha.(Intercept)   -0.582 -0.574 -1.955  0.823
-alpha.Clarity_m      0.128  0.129  0.002  0.256
-alpha.nearshoreTRUE  0.401  0.401  0.026  0.780
-alpha.DO_mgL        -0.118 -0.118 -0.281  0.041
-alpha.max_depth_ft  -0.012 -0.012 -0.019 -0.005
-alpha.strat_zm       0.183  0.180  0.104  0.274
-delta.(Intercept)   -0.367 -0.389 -2.321  1.491
-delta.cond          -0.001 -0.001 -0.003  0.000
-delta.pH             0.105  0.103 -0.138  0.352
-
-Monte Carlo SE of Bayesian estimates 
-                      Mean    50%   2.5%  97.5%
-beta.(Intercept)    0.0045 0.0049 0.0073 0.0089
-alpha.(Intercept)   0.0204 0.0233 0.0363 0.0369
-alpha.Clarity_m     0.0017 0.0020 0.0030 0.0032
-alpha.nearshoreTRUE 0.0047 0.0053 0.0104 0.0089
-alpha.DO_mgL        0.0027 0.0030 0.0045 0.0036
-alpha.max_depth_ft  0.0001 0.0001 0.0002 0.0002
-alpha.strat_zm      0.0014 0.0014 0.0019 0.0037
-delta.(Intercept)   0.0389 0.0515 0.0940 0.0512
-delta.cond          0.0000 0.0001 0.0001 0.0001
-delta.pH            0.0056 0.0076 0.0082 0.0125
-NULL
-
-```{r revisitsites}
-ccdetectiondata <- detection_data %>%
-  filter(Code != "TEN" & Code != "PKE" & Code != "WHB") %>%
-  #filter(CC == 1) %>%
-  mutate(site = as.factor(str_c(Code, sample)),
-         visit_number = as.factor(visit_number)) %>%
-  dplyr::select(site, visit_number, pcr_1, pcr_2, pcr_3)
-
-ccsurveydata <- detection_data %>%
-  filter(Code != "TEN" & Code != "PKE" & Code != "WHB") %>%
-  mutate(julian_day = yday(Date),
-         site = as.factor(str_c(Code, sample)),
-         visit_number = as.factor(visit_number)) %>%
-  #filter(CC == 1)%>%
-  dplyr::select(site, visit_number, julian_day, Date, area_acres, littoral_area_acres, 
-                max_depth_ft, mean_depth_ft, strat_zm, DO_mgL, Temp_C, 
-                cond, pH, Clarity_m, stratified, nearshore, depth_m) 
-
-col_list = c("pcr_1", "pcr_2", "pcr_3")
-temp <- ccdetectiondata %>% 
-  rowwise() %>% 
-  mutate(hits = sum(c_across(all_of(col_list)))) %>%
-  group_by(site) %>%
-  dplyr::select(site, visit_number, hits) %>%
-  pivot_wider(names_from = visit_number, values_from = hits)
-
-y = as.matrix(temp[,-1])
-rownames(y) <- temp$site
-# This is the y part of the list in occData object
-
-K <- matrix(3, nrow = nrow(y), ncol = ncol(y))
-rownames(K) <- temp$site
-colnames(K) <- 1:5
-# This is the K part of the list in occData object
-
-ccdetections <- list(y = y, K = K) 
-# right now all data is concenerend with sites instead of lakes as above
-fit0 = occModel(formulaSite = ~ 1,
-               formulaSiteAndSample = ~ 1,
-               formulaReplicate = ~ 1,
-               detectionMats = ccdetections,
-               siteAndSampleData = ccsurveydata,
-               niter = 5000,
-               niterInterval = 1000,
-               siteColName = 'site', 
-               sampleColName = "visit_number")
-posteriorPredictiveLoss(fit0, burnin = 500)
-WAIC(fit0, burnin = 500)
-
-fit1 = occModel(formulaSite = ~ mean_depth_ft,
-               formulaSiteAndSample = ~ Clarity_m + julian_day + strat_zm + 
-                 depth_m + max_depth_ft,
-               formulaReplicate = ~ cond,
-               detectionMats = ccdetections,
-               siteAndSampleData = ccsurveydata,
-               niter = 5000,
-               niterInterval = 1000,
-               siteColName = 'site', 
-               sampleColName = "visit_number")
-posteriorPredictiveLoss(fit1, burnin = 500)
-WAIC(fit1, burnin = 500)
-posteriorSummary(fit1, burnin = 500, mcError = TRUE)
-
-psi = posteriorSummaryOfSiteOccupancy(fit1, burnin = 500)
-theta = posteriorSummaryOfSampleOccupancy(fit1, burnin = 500)
-p = posteriorSummaryOfDetection(fit1, burnin = 500)
-cc_modeled <- cbind(psi = psi$median, theta = theta$median[,1], p = p$median[,1])
-
-site.clarity <- distinct(ccsurveydata, site, .keep_all = T)
-clarity <- site.clarity[,'depth_m']
-
-plot(clarity, theta$median[,1], ylim = c(0,1), xlab = "Depth ", ylab = "Detection Probability")
-segments(clarity, theta$lower[,1], clarity, theta$upper[,1], lwd=2)
-```
-
-
-
-```{r, warning=FALSE}
-cc_modeled <- as.data.frame(cc_modeled)
-cc_modeled <- tibble::rownames_to_column(cc_modeled, "site")
-temp <- ccsurveydata %>% distinct(site, .keep_all = T)
-cc_modeled_covs <- merge(cc_modeled, temp, all.y = T)
-
-cc_modeled_covs %>%
-  ggplot(aes(x = Date, y = theta, color = Code, shape = Code)) +
-  geom_point() +
-  geom_smooth(method = "loess") +
-  scale_x_date(date_breaks = "1 month", date_labels =  "%b") 
-ggsave("./figures/timing.png")
-
-cc_modeled_covs %>%
-  ggplot(aes(x = Date, y = Clarity_m, color = Code, lty = Code))+
-  geom_point() +
-  geom_smooth(method = "loess")
-
- cc_modeled_covs %>%
-  ggplot(aes(x = Date, y = theta)) +
-  geom_point(aes(color = Code)) +
-  geom_smooth(method = "loess") +
-  labs(y = "Detection Probability", title = "Global Carp Detection Probability") +
-  scale_x_date(date_breaks = "1 month", date_labels =  "%b") 
- 
- 
-cc_modeled_covs %>%
-  ggplot(aes(x = Date, y = Clarity_m, color = Code))+
-  geom_point() +
-  geom_smooth(method = "loess")
-ggsave("./figures/globaltiming.png")
-```
-
-```{r}
-rf.df <- detection_data %>%
-  rowwise() %>%
-  mutate(numdetection = as.factor(sum(c_across(pcr_1:pcr_3))),
-         numdetection = as.factor(ifelse(numdetection == 0, 0, 1)),
-         mixed_to_bottom = ifelse(depth_m < strat_zm, TRUE, FALSE),
-         julian_day = yday(Date)) %>%
-  filter(Code != "TEN" & Code != "PKE")
-         
-eDNA.rf <- randomForest(numdetection ~ area_acres + littoral_area_acres + 
-                          max_depth_ft + perimeter_miles + mean_depth_ft + 
-                          Temp_C + DO_mgL + cond + pH + Clarity_m + 
-                          stratified + strat_zm + depth_m + mixed_to_bottom + julian_day, 
-                        data = rf.df, ntree = 20000, mtry = round(sqrt(16)), nodesize = 16)
-eDNA.rf
-varImpPlot(eDNA.rf)
-```
-
-```{r basic_pres_abs}
-library(lme4)
-basic_model_df <- detection_data %>%
-  dplyr::filter(Code != "TEN" & Code != "PKE") %>%
-  rowwise() %>%
-  mutate(pres_abs = ifelse(sum(c_across(pcr_1:pcr_3)) >= 1, 1, 0),
-         jd = as.numeric(yday(Date)),
-         pres_abs = as.factor(pres_abs))
-
-visit_data <- basic_model_df %>%
-  distinct(site, .keep_all = T) %>%
-  dplyr::select(-c(UID, nearshore, deep, launch, visit_site, sample, 
-                   pcr_1, pcr_2, pcr_3, pres_abs, ZM, CC, RC, SWF))
-
-visit_presence <- basic_model_df %>%
-  group_by(site) %>%
-  count(pres_abs, .drop = F) %>%
-  dplyr::filter(pres_abs == 1) 
-
-visit_df <- merge(visit_presence, visit_data)
-
-visit_df %>% ggplot() +
-  geom_point(aes(x = jd, y = n, colour = Code)) +
-  geom_line(aes(x = jd, y = n, colour = Code)) +
-  geom_smooth(aes(x = jd, y = n))
-
-rand.mod <- glmer(pres_abs ~Clarity_m + max_depth_ft + jd + (1|Lake), data = basic_model_df,
-                  family = binomial)
-summary(rand.mod)
-plot(effects::allEffects(rand.mod, partial.residuals = TRUE))
-```
-
-
 ```{r crosshabitat, warning = F}
 habitat <- read.csv("./data/lake_info_Cross.csv")
 eDNA_DOW <- physical$DOW
@@ -725,5 +1100,7 @@ table <- physical %>%
     decimals = 1) %>%
   tab_source_note("Data from MN DNR")
 gtsave(table , "physical_characteristics.png")
+table
 ```
+
 

@@ -1,0 +1,61 @@
+
+model {
+# priors
+  # regression coefficients
+  
+  # SD's for simple random effects (detection: p)
+  psi.spp.sd ~ dunif(0, 1) # SD for spp effects
+  psi.spp.tau <- pow(psi.spp.sd, -2) # convert to precision
+  psi.lake.sd ~ dunif(0, 1) # SD for lake effects
+  psi.lake.tau <- pow(psi.lake.sd, -2) 
+  # sites are uniquely nested within lakes, no context as simple RE
+
+  # SDs and precision for complex random effects (all presumed spp-specific)
+  psi.spp.lake.sd ~ dunif(0, 1) # spp-lake effect
+  psi.spp.lake.tau <- pow(psi.spp.lake.sd, -2) 
+  psi.spp.lake.site.sd ~ dunif(0, 1) # SD for site effects within lakes within spp
+  psi.spp.lake.site.tau <- pow(psi.spp.lake.site.sd, -2) 
+
+# species specific priors 
+  for (i in 1:n.spp){
+    psi.spp[i] ~ dunif(0, 1) # species-specific occupancy
+    b.depth[i] ~ dnorm(0, 0.33) # vague prior for regression slope of depth
+    b.lake.size[i] ~ dnorm(0, 0.33)
+    
+    p.spp[i] ~ dnorm(0, psi.spp.tau)  # spp mean detection (logit scale)
+    a.jd[i] ~ dnorm(0, 0.33)
+    a.jd2[i] ~ dnorm(0, 0.33)
+    
+    # species-lake effect
+    for (j in 1:n.lakes){
+      psi.spp.lake[i,j] ~ dnorm(0, psi.spp.lake.tau) # lake-by-spp adjustments
+      for (s in 1:n.sites){
+        psi.spp.lake.site[i,j,s] ~ dnorm(0, psi.spp.lake.site.tau) # spp-lake-site
+      }
+    }
+  }
+
+# Ecological model for true detection (occupancy)
+
+  for (i in 1:n.obs) {
+          logit(psi[i]) <- psi.spp[spp[i,]] + psi.spp.lake[spp[i,], lake[i,]] + 
+          psi.spp.lake.site[spp[i,], lake[i,], site[i,]] +
+            b.depth[spp[i,]] * depth[i,] + b.lake.size[spp[i,]] * lake.size[i,]
+  } # end obs loop (i)
+
+# Observation model for replicated detection/nondetection observations (detection)
+
+    for (n in 1:n.obs) {
+      z[n] <- occupancy[lake[n,],spp[n,]] # is the species in the lake?
+      for (k in 1:n.reps){
+        logit(p[n, k]) <- p.spp[spp[n,]] + a.jd[spp[n,]] * julian_day[n,] + 
+                                a.jd2[spp[n,]] * julian_day2[n,]
+        
+        y[n,k] ~ dbern(z[n]*psi[n]*(p[n, k])) 
+        
+        # is the species in the lake * which species, which lake, what time, what site
+      } # close k
+    } # close n
+    
+} # end jags model
+
