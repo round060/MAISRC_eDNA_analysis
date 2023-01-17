@@ -706,12 +706,12 @@ Requirements for this function to work:
   4- Run the script. 
 
 ```{r, warning = FALSE}
-filenames <- dir(path = "./data/pcr_data", pattern = ".xls") # Getting all .xls filenames from current working directory
+filenames <- dir(path = "./data/pcr_data1", pattern = ".xls") # Getting all .xls filenames from current working directory
 results <- list() # Initializing an empty list
 
 for (filename in filenames) {
   # Read StepOne Plus excel file
-  a <- suppressMessages(read_xls(paste0("./data/pcr_data/", filename)))
+  a <- suppressMessages(read_xls(paste0("./data/pcr_data1/", filename)))
   
   # Rename columns. target, cq and sq should not be changed. These names are needed for the LOD/LOQ script to run.
   colnames(a) <- c("uid", "target", "task", "cq", "ct_mean", 

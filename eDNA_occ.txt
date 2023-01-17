@@ -1,14 +1,6 @@
 
 model {
 # priors
-  # regression coefficients
-  
-  # SD's for simple random effects (detection: p)
-  psi.spp.sd ~ dunif(0, 1) # SD for spp effects
-  psi.spp.tau <- pow(psi.spp.sd, -2) # convert to precision
-  psi.lake.sd ~ dunif(0, 1) # SD for lake effects
-  psi.lake.tau <- pow(psi.lake.sd, -2) 
-  # sites are uniquely nested within lakes, no context as simple RE
 
   # SDs and precision for complex random effects (all presumed spp-specific)
   psi.spp.lake.sd ~ dunif(0, 1) # spp-lake effect
@@ -19,12 +11,16 @@ model {
 # species specific priors 
   for (i in 1:n.spp){
     psi.spp[i] ~ dunif(0, 1) # species-specific occupancy
-    b.depth[i] ~ dnorm(0, 0.33) # vague prior for regression slope of depth
-    b.lake.size[i] ~ dnorm(0, 0.33)
+    b.depth[i] ~ dnorm(0, 1.75) # vague prior for regression slope of depth
+    b.lake.size[i] ~ dnorm(0, 1.75)
     
-    p.spp[i] ~ dnorm(0, psi.spp.tau)  # spp mean detection (logit scale)
-    a.jd[i] ~ dnorm(0, 0.33)
-    a.jd2[i] ~ dnorm(0, 0.33)
+    #p.spp[i] ~ dnorm(0, 1.75)  # spp mean detection (logit scale)
+    a.jd[i] ~ dnorm(0, 1.75)
+    a.jd2[i] ~ dnorm(0, 1.75)
+    
+    for (status in 1:2){
+    p.spp[i, status] ~ dnorm(0, 1.75)
+    }
     
     # species-lake effect
     for (j in 1:n.lakes){
@@ -37,23 +33,28 @@ model {
 
 # Ecological model for true detection (occupancy)
 
-  for (i in 1:n.obs) {
-          logit(psi[i]) <- psi.spp[spp[i,]] + psi.spp.lake[spp[i,], lake[i,]] + 
-          psi.spp.lake.site[spp[i,], lake[i,], site[i,]] +
-            b.depth[spp[i,]] * depth[i,] + b.lake.size[spp[i,]] * lake.size[i,]
-  } # end obs loop (i)
+  for (i in 1:n.spp) {
+    for (j in 1:n.lakes){
+        for (s in 1:n.sites){
+          logit(psi[i,j,s]) <- psi.spp[i] + psi.spp.lake[i,j] + psi.spp.lake.site[i,j,s] +
+            b.depth[i] * depth[j,s] + b.lake.size[i] * lake.size[,j]
+            
+          # is the species in the lake * which species, which lake, what time, what site
+        } # end site loop (i)
+    } # end spp loop (j)
+  } # end spp loop (i)
 
 # Observation model for replicated detection/nondetection observations (detection)
 
     for (n in 1:n.obs) {
       z[n] <- occupancy[lake[n,],spp[n,]] # is the species in the lake?
       for (k in 1:n.reps){
-        logit(p[n, k]) <- p.spp[spp[n,]] + a.jd[spp[n,]] * julian_day[n,] + 
+        logit(p[n, k]) <- p.spp[spp[n,], strat[n,]] + a.jd[spp[n,]] * julian_day[n,] + 
                                 a.jd2[spp[n,]] * julian_day2[n,]
         
-        y[n,k] ~ dbern(z[n]*psi[n]*(p[n, k])) 
+        y[n,k] ~ dbern(z[n]*psi[spp[n,],lake[n,],site[n,]]*(p[n, k])) 
         
-        # is the species in the lake * which species, which lake, what time, what site
+        
       } # close k
     } # close n
     

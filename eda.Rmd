@@ -6,28 +6,57 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(readxl) 
+library(lubridate)
+library(gt)
+library(randomForest)
+options(scipen = 999)
 
+read_excel_allsheets <- function(filename, tibble = FALSE) {
+    sheets <- readxl::excel_sheets(filename)
+    x <- lapply(sheets, function(X) readxl::read_excel(filename, sheet = X))
+    if (!tibble) x <- lapply(x, as.data.frame)
+    names(x) <- sheets
+    x
+}
 ```
 
 
 
 ```{r cars}
 lakesitecovariates %>% 
-  mutate(ZM = as.logical(ZM)) %>%
-  ggplot(aes(x = ZM, y = Clarity_m)) + 
-  geom_boxplot()
-
-
-lakesitecovariates %>% 
   mutate(ZM = as.logical(ZM), 
          Clarity_m = as.numeric(Clarity_m)) %>%
   ggplot(aes(x = ZM, y = Clarity_m)) + 
   geom_boxplot()
+
+lakesitecovariates %>% 
+  ggplot(aes(x = pH, y = Clarity_m, color = Code)) +
+  geom_point() 
+
+lakesitecovariates %>% 
+  ggplot(aes(x = log(area_acres), y = pH, color = Code)) +
+  geom_point() 
+
+lakesitecovariates %>% 
+  ggplot(aes(x = mean_depth_ft, y = Clarity_m, color = Code)) +
+  geom_point() 
+
+lakesitecovariates %>% 
+  ggplot(aes(x = Temp_C, y = Clarity_m, color = Code)) +
+  geom_point() + geom_line()
+
+lakesitecovariates %>% 
+  ggplot(aes(x = visit_number, y = Temp_C)) +
+  geom_violin()
+
+lakesitecovariates %>% 
+  ggplot(aes(y = strat_zm, x = Temp_C, color = stratified)) +
+  geom_point()
 ```
 
-## Including Plots
-
-You can also embed plots, for example:
 
 ```{r pressure, echo=FALSE}
 profiles %>%

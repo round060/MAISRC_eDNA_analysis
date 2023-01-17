@@ -12,6 +12,7 @@ library(readxl)
 library(lubridate)
 library(gt)
 library(randomForest)
+library(mcmcplots)
 options(scipen = 999)
 
 read_excel_allsheets <- function(filename, tibble = FALSE) {
@@ -21,13 +22,22 @@ read_excel_allsheets <- function(filename, tibble = FALSE) {
     names(x) <- sheets
     x
 }
+
+detect.likeli = function(p, a = 0.95){ 
+#given a prob of detection (p) and confidence (a), calculates samples required
+  log(1 - a)/log(1 - p)
+}
+
+logit = function(x) {
+  exp(x)/(1+exp(x))
+}
 site_covariate_data <- read_excel_allsheets("./data/field_data/Activity_1_eDNA_Field_Data_2021.xlsx")
 
 profiles <- site_covariate_data$Temp_DO_Profiles #contains profiles
 sample_data <- site_covariate_data$A1_Samples #contains sample covariate data
 physical <- site_covariate_data$Lakes #contains lake physical data (site level)
 
-qpcr_data <- read.csv("./data/05-Dec-2022_qPCR_activity_one_results.csv") #qPCR data
+qpcr_data <- read.csv("./data/04-Jan-2023_qPCR_activity_one_results.csv") #qPCR data
 
 ```
 
@@ -85,7 +95,10 @@ for (row in 1:nrow(covariate_data)) {
 clean_covariates <- merge(covariate_data, stratify_zm, by = "UID")
 
 # This is the data frame with one column per lake sample visit, we lose some information (temperature/DO at depth) but has most data.
-clean_covariates <- clean_covariates %>% dplyr::filter(Depth_m == 0) %>% dplyr::select(-max_depth)
+clean_covariates <- clean_covariates %>% 
+  dplyr::filter(Depth_m == 0) %>% 
+  dplyr::select(-max_depth) %>%
+  mutate(Code = str_extract(UID, "[aA-zZ]+"))
 
 rm(stratify_zm); rm(covariate_data)
 ```
@@ -114,9 +127,10 @@ for (i in 1:length(unique(depth_df$df_list))){
 ```{r lake, warning = FALSE}
 # merges the profile/WQ data with the lake physical data
 
-lakesitecovariates <- merge(physical, clean_covariates)
+lakesitecovariates <- merge(physical, clean_covariates, by = c("Lake","Code"))
 lakesitecovariates <- lakesitecovariates %>%
-  mutate(Lake = as.factor(Lake),
+  mutate(
+         Lake = as.factor(Lake),
          visit_number = as.factor(visit_number),
          DOW = as.factor(DOW),
          mean_depth_ft = as.numeric(mean_depth_ft),
@@ -145,6 +159,10 @@ subset_qpcr_data <- qpcr_data %>%
          Code = str_extract(uid, "[aA-zZ]+")) %>%
   dplyr::filter(Code != "PKEX", Code != "SLEX") %>%
   dplyr::filter(visit_site > 0, visit_site < 11)
+
+subset_qpcr_data %>% group_by(Code, visit_number) %>%
+  count(uid) %>%
+  summarise(n = n())
 
 all_data_pcr <- merge(subset_qpcr_data, lakesitecovariates, 
                       by = c("Code", "visit_number"))
@@ -232,7 +250,7 @@ newdetections_cc <- contamination %>%
   dplyr::filter(!Code %in% c("VER", "SHG"))
 
 newdetections_rc <- contamination %>%
-  dplyr::filter(RC ==0) %>%
+  dplyr::filter(RC == 0) %>%
   dplyr::filter(numdetection > 0) %>%
   dplyr::filter(target == "Crayfish") %>% 
   dplyr::filter(!Code %in% c()) %>%
@@ -376,39 +394,58 @@ partialPlot(rc_forest, as.data.frame(mix_RF_df), x.var = "cond")
 
 ```
 
-
+# stable
 ```{r stable}
-Sys.setenv(JAGS_HOME='C:/Program Files')
+Sys.setenv(JAGS_HOME = 'C:/Program Files')
 library(jagsUI)
 
 # these are the lakes with all 5 PCR visits
 data4jags <- contamination %>% 
   mutate(julian_day_2 = julian_day^2) %>%
+  #dplyr::filter(contaminated == 0) %>%
   dplyr::filter(
-    Code %in% c("BDG", "BEN", "CLR", "FLF", "FST", "LEH", "MIL", "OWS", "PHN", "PRO", "TEN", "WHB")) %>%
+    Code %in% c("BDG", "BEN", "CLR", "FLF", "FST", "ILR", "KAB", "LEH", "MIL", "OWA", "OWS",
+                "PHN", "PKE", "PRO", "SHG", "TEN", "VER", "WHB")) %>%
+  dplyr::filter(target %in% c("common carp", "Crayfish")) %>%
   relocate(Code, UID, visit_number, sample, target, pcr_1, pcr_2, 
-           pcr_3, depth_m, area_acres, julian_day, julian_day_2) %>%
-  arrange(target, Code, sample, visit_number)
+           pcr_3, depth_m, area_acres, julian_day, julian_day_2, contaminated) %>%
+  arrange(target, Code, visit_number, sample)
 
 n.lakes <- as.numeric(length(unique(data4jags$Code)))
 n.sites <- 10
 n.spp <- 2
 
+carp_visits <- data4jags %>%
+  dplyr::filter(target == "common carp") %>%
+  distinct(Code, target, visit_number) %>%
+  count(Code) %>% 
+  arrange(Code)
+crayfish_visits <- data4jags %>%
+  dplyr::filter(target == "Crayfish") %>%
+  distinct(Code, target, visit_number) %>%
+  count(Code) %>% 
+  arrange(Code)
 
+visits = cbind(crayfish_visits[,2], carp_visits[,2])
 
-
-occupancy <- matrix(c(1,1,
-                      1,0,
-                      1,1,
-                      1,1,
-                      1,1,
-                      1,1,
-                      1,1,
-                      1,0,
-                      1,1,
-                      1,1,
-                      1,1,
-                      0,1), ncol = 2)
+occupancy <- matrix( c(1,1,
+                       1,1,
+                       1,1,
+                       0,0,
+                       1,1,
+                       0,0,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       0,0,
+                       1,1,
+                       1,1,
+                       1,0,
+                       1,1,
+                       1,1), ncol = 2, byrow = T)
 
 # covraiate for depth
 depth.data <- data4jags %>% group_by(Code, visit_site) %>%
@@ -433,6 +470,13 @@ area.acres <- data4jags %>% group_by(Code) %>%
   distinct(Code, area_acres) %>%
   pivot_wider(names_from = "Code", values_from = area_acres) 
 
+stratified <- data4jags %>% group_by(Code, visit_number) %>%
+  dplyr::select(stratified) %>%
+  distinct(Code, visit_number, stratified) %>%
+  mutate(stratified = ifelse(stratified == T, 1, 0)) %>%
+  pivot_wider(names_from = "visit_number", values_from = stratified) %>%
+  remove_rownames %>% column_to_rownames(var = "Code")
+
 species <- data4jags %>% mutate(species = ifelse(target == "Crayfish", 1, 2)) %>%
   dplyr::select(species)
 
@@ -443,23 +487,31 @@ lake <- data4jags %>% ungroup() %>% mutate(lake_number =
   Code == "CLR" ~ 3,
   Code == "FLF" ~ 4,
   Code == "FST" ~ 5,
-  Code == "LEH" ~ 6,
-  Code == "MIL" ~ 7,
-  Code == "OWS" ~ 8,
-  Code == "PHN" ~ 9,
-  Code == "PRO" ~ 10,
-  Code == "TEN" ~ 11,
-  Code == "WHB" ~ 12)) %>% dplyr::select(lake_number)
+  Code == "ILR" ~ 6,
+  Code == "KAB" ~ 7,
+  Code == "LEH" ~ 8,
+  Code == "MIL" ~ 9,
+  Code == "OWA" ~ 10,
+  Code == "OWS" ~ 11,
+  Code == "PHN" ~ 12,
+  Code == "PKE" ~ 13,
+  Code == "PRO" ~ 14,
+  Code == "SHG" ~ 15,
+  Code == "TEN" ~ 16,
+  Code == "VER" ~ 17,
+  Code == "WHB" ~ 18)) %>% dplyr::select(lake_number)
 
 jags.data.temp <- list(y = as.matrix(data4jags[,6:8]), 
                   n.obs = nrow(data4jags),
                   n.spp = n.spp, n.lakes = n.lakes,
+                  visits = visits,
                   n.sites = 10, n.times = 5, 
                   n.reps = 3, occupancy = occupancy,
                   spp = as.vector(species[,1]), lake = as.matrix(lake[,1]),
                   time = data4jags[,3], site = data4jags[,4],
                   depth = as.matrix(depth.data), 
-                  julian_day = as.matrix(data4jags[,11]), julian_day2 = as.matrix(data4jags[,12]),
+                  julian_day = as.matrix(data4jags[,11]), 
+                  julian_day2 = as.matrix(data4jags[,12]),
                   jd = jd.data, jd2 = jd2.data, lake.size = area.acres)
 
 occupancy = as.matrix(occupancy)
@@ -490,7 +542,7 @@ model {
     b.depth[i] ~ dnorm(0, 0.33) # vague prior for regression slope of depth
     b.lake.size[i] ~ dnorm(0, 0.33)
     
-    p.spp[i] ~ dnorm(0, psi.spp.tau)  # spp mean detection (logit scale)
+    p.spp[i] ~ dnorm(0, 1.75)  # spp mean detection (logit scale)
     a.jd[i] ~ dnorm(0, 0.33)
     a.jd2[i] ~ dnorm(0, 0.33)
     
@@ -507,13 +559,11 @@ model {
 
   for (i in 1:n.spp) {
     for (j in 1:n.lakes){
-      for (t in 1:n.times){
         for (s in 1:n.sites){
-          logit(psi[i,j,t,s]) <- psi.spp[i] + psi.spp.lake[i,j] + psi.spp.lake.site[i,j,s] +
+          logit(psi[i,j,s]) <- psi.spp[i] + psi.spp.lake[i,j] + psi.spp.lake.site[i,j,s] +
             b.depth[i] * depth[j,s] + b.lake.size[i] * lake.size[,j]
             
         } # end site loop (i)
-      } # end time loop (t)
     } # end spp loop (j)
   } # end spp loop (i)
 
@@ -525,7 +575,7 @@ model {
         logit(p[n, k]) <- p.spp[spp[n,]] + a.jd[spp[n,]] * julian_day[n,] + 
                                 a.jd2[spp[n,]] * julian_day2[n,]
         
-        y[n,k] ~ dbern(z[n]*psi[spp[n,],lake[n,],time[n,],site[n,]]*(p[n, k])) 
+        y[n,k] ~ dbern(z[n]*psi[spp[n,],lake[n,],site[n,]]*(p[n, k])) 
         
         # is the species in the lake * which species, which lake, what time, what site
       } # close k
@@ -541,7 +591,7 @@ params <- c("b.depth", "b.lake.size", "a.jd", "a.jd2",
             "psi.spp.lake", "psi.lake.sd", 
             "psi.spp.lake.sd", "psi.spp.lake.sd")
 
-na <- 1000; ni <- 20000; nt <- 3; nb <- 1000; nc <- 3 # short for test run
+na <- 1000; ni <- 5000; nt <- 3; nb <- 1000; nc <- 3 # short for test run
 #na <- 1000; ni <- 60000; nt <- 10; nb <- 10000; nc <- 3
 
 # Call JAGS from R (~44 min at 60,000 ni)
@@ -550,6 +600,7 @@ eDNA1.out <- jags(jags.data.temp, inits = NULL, params, "eDNA_occ.txt",
                   n.iter = ni, n.burnin = nb, parallel = TRUE)
 print(eDNA1.out, dig = 2)
 mcmcOutput::diagPlot(eDNA1.out)
+plogis(eDNA1.out$mean$psi.spp.lake)
 
 par(mfrow = c(2,2))
 # crayfish = red
@@ -595,7 +646,8 @@ num = 1
 for (i in 1:n.spp){
   for (j in 1:n.lakes){
     for (k in 1:n.sites){
-      tidy.output[num,] <- data.frame(mean = eDNA1.out$mean$psi.spp.lake.site[i,j,k], spp = i, lake = j, site = k)
+      tidy.output[num,] <- data.frame(mean = eDNA1.out$mean$psi.spp.lake.site[i,j,k], 
+                                      spp = i, lake = j, site = k)
       num = num + 1
     }
   }
@@ -613,7 +665,7 @@ ggsave("jags.site.variability.png")
 
 # plot depth effect over time 
 range(contamination$depth_m, na.rm = T)
-depth_pred <- seq(1/2, 60, by = 0.5)
+depth_pred <- seq(1, 80, by = 0.5)
 log_depth_pred <- log(depth_pred)
 depth.standard <- wiqid::standardize2match(log_depth_pred, depths)
 
@@ -623,7 +675,8 @@ depthplot <- data.frame( depth =  rep(depth_pred, n.spp),
                      depth.standard = rep(depth.standard, n.spp), 
                      depth.standard2 = rep(depth.standard^2, n.spp),
                      mean = rep(NA, length(depth.standard)*2), 
-                     high = rep(NA, length(depth.standard)*2), low = rep(NA, length(depth.standard)*2), 
+                     high = rep(NA, length(depth.standard)*2), 
+                     low = rep(NA, length(depth.standard)*2), 
                      spp = as.factor(c(rep(1, length(depth.standard)), rep(2, length(depth.standard)))))
 
 for (i in 1:nrow(depthplot)) {
@@ -679,6 +732,7 @@ jdplot %>%
   geom_ribbon(aes(ymin = low, ymax = high, fill = spp), alpha = 0.2)+
   labs(y = "Detection probability", x = "Julian day")
 #ggsave("jags.juliandayeffect.png")
+
 ```
 
 
@@ -691,35 +745,44 @@ library(jagsUI)
 data4jags <- contamination %>% 
   mutate(julian_day_2 = julian_day^2) %>%
   dplyr::filter(
-    Code %in% c("BDG", "BEN", "CLR", "FLF", "FST", "LEH", "MIL", "OWS", "PHN", "PRO", "TEN", "WHB")) %>%
+    Code %in% c("BDG", "BEN", "CLR", "FLF", "FST", "ILR", "KAB", "LEH", "MIL", "OWA", "OWS",
+                "PHN", "PKE", "PRO", "SHG", "TEN", "VER", "WHB")) %>%
   relocate(Code, UID, visit_number, sample, target, pcr_1, pcr_2, 
            pcr_3, depth_m, area_acres, julian_day, julian_day_2) %>%
   arrange(target, Code, sample, visit_number) %>%
   dplyr::filter(contaminated != 1)
 
-# What lakes are we missing
+# What lakes are we missing adding ILR, KAB, OWA, PKE 
 #MCN, JHN, SHG, ILR, VER, PKE, CRN, KAB, OWA
 
 n.lakes <- as.numeric(length(unique(data4jags$Code)))
 n.sites <- 10
 n.spp <- 2
 
+occupancy <- matrix( c(1,1,
+                       1,1,
+                       1,1,
+                       0,0,
+                       1,1,
+                       0,0,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       0,0,
+                       1,1,
+                       1,1,
+                       1,0,
+                       1,1,
+                       1,1), ncol = 2, byrow = T)
 
 
-
-occupancy <- matrix(c(1,1,
-                      1,0,
-                      1,1,
-                      1,1,
-                      1,1,
-                      1,1,
-                      1,1,
-                      1,0,
-                      1,1,
-                      1,1,
-                      1,1,
-                      0,1), ncol = 2)
-
+#occupancy1 <- matrix(c(0,0,0), c(,1,1,1), ncol = 2, byrow = T)
+rownames(occupancy) <- c("BDG", "BEN", "CLR", "FLF", "FST", "ILR", "KAB", "LEH", 
+                         "MIL", "OWA", "OWS","PHN", "PKE", "PRO", "SHG", "TEN", "VER", "WHB")
+colnames(occupancy) <- c("RC", "CC")
 # covraiate for depth
 depth.data <- data4jags %>% dplyr::select(depth_m)
 # covariate for julian day
@@ -739,13 +802,19 @@ lake <- data4jags %>% ungroup() %>% mutate(lake_number =
   Code == "CLR" ~ 3,
   Code == "FLF" ~ 4,
   Code == "FST" ~ 5,
-  Code == "LEH" ~ 6,
-  Code == "MIL" ~ 7,
-  Code == "OWS" ~ 8,
-  Code == "PHN" ~ 9,
-  Code == "PRO" ~ 10,
-  Code == "TEN" ~ 11,
-  Code == "WHB" ~ 12)) %>% dplyr::select(lake_number)
+  Code == "ILR" ~ 6,
+  Code == "KAB" ~ 7,
+  Code == "LEH" ~ 8,
+  Code == "MIL" ~ 9,
+  Code == "OWA" ~ 10,
+  Code == "OWS" ~ 11,
+  Code == "PHN" ~ 12,
+  Code == "PKE" ~ 13,
+  Code == "PRO" ~ 14,
+  Code == "SHG" ~ 15,
+  Code == "TEN" ~ 16,
+  Code == "VER" ~ 17,
+  Code == "WHB" ~ 18)) %>% dplyr::select(lake_number)
 
 jags.data.temp <- list(y = as.matrix(data4jags[,6:8]), 
                   n.obs = nrow(data4jags),
@@ -755,7 +824,8 @@ jags.data.temp <- list(y = as.matrix(data4jags[,6:8]),
                   spp = as.vector(species[,1]), lake = as.matrix(lake[,1]),
                   time = data4jags[,3], site = data4jags[,4],
                   depth = as.matrix(depth.data), 
-                  julian_day = as.matrix(data4jags[,11]), julian_day2 = as.matrix(data4jags[,12]),
+                  julian_day = as.matrix(data4jags[,11]), 
+                  julian_day2 = as.matrix(data4jags[,12]),
                   jd = jd.data, jd2 = jd2.data, lake.size = area.acres)
 
 occupancy = as.matrix(occupancy)
@@ -831,7 +901,7 @@ params <- c("b.depth", "b.lake.size", "a.jd", "a.jd2",
             "psi.spp.lake", "psi.lake.sd", 
             "psi.spp.lake.sd", "psi.spp.lake.sd")
 
-na <- 2500; ni <- 20000; nt <- 3; nb <- 2000; nc <- 3 # short for test run
+na <- 2500; ni <- 5000; nt <- 3; nb <- 1000; nc <- 3 # short for test run
 #na <- 1000; ni <- 60000; nt <- 10; nb <- 10000; nc <- 3
 
 # Call JAGS from R (~44 min at 60,000 ni)
@@ -875,23 +945,6 @@ for (i in 2:n.spp){
 }
 
 
-
-eDNA1.out$mean$p.spp.lake.site[1,,1] # Species 1, site 1
-eDNA1.out$mean$p.spp.lake.site[1,1,] # Species 1, lake 1
-
-
-tidy.output <- data.frame(mean = numeric(), spp = numeric(), lake = numeric(), site = numeric())
-num = 1
-for (i in 1:n.spp){
-  for (j in 1:n.lakes){
-    for (k in 1:n.sites){
-      tidy.output[num,] <- data.frame(mean = eDNA1.out$mean$psi.spp.lake.site[i,j,k], spp = i, lake = j, site = k)
-      num = num + 1
-    }
-  }
-}
-
-
 tidy.output %>% 
   mutate(prob.mean = plogis(mean), ssp = as.factor(spp), lake = as.factor(lake), site = as.factor(site)) %>%
   ggplot(aes(x = site, y = prob.mean, color = lake, group = lake)) +
@@ -904,7 +957,7 @@ ggsave("jags.site.variability.png")
 
 #### plot depth effect for all species #### 
 range(contamination$depth_m, na.rm = T)
-(depth_pred <- seq(1/2, 60, by = 0.5))
+(depth_pred <- seq(1, 80, by = 0.5))
 log_depth_pred <- log(depth_pred)
 depth.standard <- wiqid::standardize2match(log_depth_pred, depths)
 
@@ -935,6 +988,8 @@ depthplot %>%
   )) %>%
   ggplot(aes(x = depth, y = mean, color = species)) +
   geom_line() +
+  labs(y = "DNA Occurence", x = "Julian day") +
+  guides(color="none", fill = guide_legend("Species")) +
   geom_ribbon(aes(ymin = low, ymax = high, fill = species), alpha = 0.2)
 #ggsave("jags.deptheffect.png")
 
@@ -944,7 +999,7 @@ depthplot %>%
 
 #### Plot time effect for all species #####
 range(contamination$julian_day)
-dates_pred <- seq(105, 300)
+dates_pred <- seq(105, 330)
 dates.standard <- wiqid::standardize2match(dates_pred, dates)
 
 jdplot <- matrix(NA, 196*n.spp, 3)
@@ -961,7 +1016,6 @@ for (i in 1:nrow(jdplot)) {
   # I should be adding an intercept here?
   logit.p.tmp <- eDNA1.out$sims.list$a.jd[,s] * jdplot$dates.standard[i] + 
       eDNA1.out$sims.list$a.jd2[,s] * jdplot$dates.standard2[i] + eDNA1.out$sims.list$p.spp[,s]
-    
     #with(eDNA1.out$sims.list, b.jd * dates.standard[i] + b.jd2 * dates.standard[i]^2)
   p.tmp <- plogis(logit.p.tmp)
   jdplot[i, 4] <- mean(p.tmp)
@@ -981,7 +1035,559 @@ jdplot %>%
 #ggsave("jags.juliandayeffect.png")
 ```
 
+# working on this
+```{r}
+Sys.setenv(JAGS_HOME = 'C:/Program Files')
+library(jagsUI)
 
+# these are the lakes with all 5 PCR visits
+data4jags <- contamination %>% 
+  mutate(julian_day_2 = julian_day^2) %>%
+  dplyr::filter(contaminated == 0) %>%
+  mutate(stratified = ifelse(stratified == T, 1, 2)) %>%
+  dplyr::filter(
+    Code %in% c("BDG", "BEN", "CLR", "FLF", "FST", "ILR", "KAB", "LEH", "MIL", "OWA", "OWS",
+                "PHN", "PKE", "PRO", "SHG", "TEN", "VER", "WHB")) %>%
+  dplyr::filter(target %in% c("common carp", "Crayfish")) %>%
+  relocate(Code, UID, visit_number, sample, target, pcr_1, pcr_2, pcr_3, 
+           depth_m, area_acres, julian_day, julian_day_2, stratified, contaminated) %>%
+  arrange(target, Code, visit_number, sample)
+
+n.lakes <- as.numeric(length(unique(data4jags$Code)))
+n.sites <- 10
+n.spp <- 2
+
+carp_visits <- data4jags %>%
+  dplyr::filter(target == "common carp") %>%
+  distinct(Code, target, visit_number) %>%
+  count(Code) %>% 
+  arrange(Code)
+crayfish_visits <- data4jags %>%
+  dplyr::filter(target == "Crayfish") %>%
+  distinct(Code, target, visit_number) %>%
+  count(Code) %>% 
+  arrange(Code)
+
+visits = cbind(crayfish_visits[,2], carp_visits[,2])
+
+occupancy <- matrix( c(1,1,
+                       1,1,
+                       1,1,
+                       0,0,
+                       1,1,
+                       0,0,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       0,0,
+                       1,1,
+                       1,1,
+                       1,0,
+                       1,1,
+                       1,1), ncol = 2, byrow = T)
+
+# covraiate for depth
+depth.data <- data4jags %>% group_by(Code, visit_site) %>%
+  mutate(site_depth_m = mean(depth_m)) %>%
+  distinct(Code, visit_site, site_depth_m) %>%
+  pivot_wider(names_from = "visit_site", values_from = site_depth_m) %>%
+  remove_rownames %>% column_to_rownames(var = "Code")
+# covariate for julian day
+
+area.acres <- data4jags %>% group_by(Code) %>%
+  dplyr::select(area_acres) %>%
+  distinct(Code, area_acres) %>%
+  pivot_wider(names_from = "Code", values_from = area_acres) 
+
+
+species <- data4jags %>% mutate(species = ifelse(target == "Crayfish", 1, 2)) %>%
+  dplyr::select(species)
+
+lake <- data4jags %>% ungroup() %>% mutate(lake_number =
+  case_when(
+  Code == "BDG" ~ 1, 
+  Code == "BEN" ~ 2,
+  Code == "CLR" ~ 3,
+  Code == "FLF" ~ 4,
+  Code == "FST" ~ 5,
+  Code == "ILR" ~ 6,
+  Code == "KAB" ~ 7,
+  Code == "LEH" ~ 8,
+  Code == "MIL" ~ 9,
+  Code == "OWA" ~ 10,
+  Code == "OWS" ~ 11,
+  Code == "PHN" ~ 12,
+  Code == "PKE" ~ 13,
+  Code == "PRO" ~ 14,
+  Code == "SHG" ~ 15,
+  Code == "TEN" ~ 16,
+  Code == "VER" ~ 17,
+  Code == "WHB" ~ 18)) %>% dplyr::select(lake_number)
+
+jags.data.temp <- list(y = as.matrix(data4jags[,6:8]), 
+                  n.obs = nrow(data4jags),
+                  n.spp = n.spp, n.lakes = n.lakes,
+                  visits = visits,
+                  n.sites = 10, n.times = 5, 
+                  n.reps = 3, occupancy = occupancy,
+                  spp = as.vector(species[,1]), lake = as.matrix(lake[,1]),
+                  time = data4jags[,3], site = data4jags[,4],
+                  depth = as.matrix(depth.data), 
+                  julian_day = as.matrix(data4jags[,11]), 
+                  julian_day2 = as.matrix(data4jags[,12]),
+                  strat = data4jags[,13], lake.size = area.acres)
+
+occupancy = as.matrix(occupancy)
+
+
+sink("eDNA_occ.txt")
+cat("
+model {
+# priors
+
+  # SDs and precision for complex random effects (all presumed spp-specific)
+  psi.spp.lake.sd ~ dunif(0, 1) # spp-lake effect
+  psi.spp.lake.tau <- pow(psi.spp.lake.sd, -2) 
+  psi.spp.lake.site.sd ~ dunif(0, 1) # SD for site effects within lakes within spp
+  psi.spp.lake.site.tau <- pow(psi.spp.lake.site.sd, -2) 
+
+# species specific priors 
+  for (i in 1:n.spp){
+    psi.spp[i] ~ dunif(0, 1) # species-specific occupancy
+    b.depth[i] ~ dnorm(0, 1.75) # vague prior for regression slope of depth
+    b.lake.size[i] ~ dnorm(0, 1.75)
+    
+    #p.spp[i] ~ dnorm(0, 1.75)  # spp mean detection (logit scale)
+    a.jd[i] ~ dnorm(0, 1.75)
+    a.jd2[i] ~ dnorm(0, 1.75)
+    
+    for (status in 1:2){
+    p.spp[i, status] ~ dnorm(0, 1.75)
+    }
+    
+    # species-lake effect
+    for (j in 1:n.lakes){
+      psi.spp.lake[i,j] ~ dnorm(0, psi.spp.lake.tau) # lake-by-spp adjustments
+      for (s in 1:n.sites){
+        psi.spp.lake.site[i,j,s] ~ dnorm(0, psi.spp.lake.site.tau) # spp-lake-site
+      }
+    }
+  }
+
+# Ecological model for true detection (occupancy)
+
+  for (i in 1:n.spp) {
+    for (j in 1:n.lakes){
+        for (s in 1:n.sites){
+          logit(psi[i,j,s]) <- psi.spp[i] + psi.spp.lake[i,j] + psi.spp.lake.site[i,j,s] +
+            b.depth[i] * depth[j,s] + b.lake.size[i] * lake.size[,j]
+            
+          # is the species in the lake * which species, which lake, what time, what site
+        } # end site loop (i)
+    } # end spp loop (j)
+  } # end spp loop (i)
+
+# Observation model for replicated detection/nondetection observations (detection)
+
+    for (n in 1:n.obs) {
+      z[n] <- occupancy[lake[n,],spp[n,]] # is the species in the lake?
+      for (k in 1:n.reps){
+        logit(p[n, k]) <- p.spp[spp[n,], strat[n,]] + a.jd[spp[n,]] * julian_day[n,] + 
+                                a.jd2[spp[n,]] * julian_day2[n,]
+        
+        y[n,k] ~ dbern(z[n]*psi[spp[n,],lake[n,],site[n,]]*(p[n, k])) 
+        
+        
+      } # close k
+    } # close n
+    
+} # end jags model
+",fill = TRUE)  # back to R code
+sink()
+
+# Parameters monitored
+params <- c("b.depth", "b.lake.size", 
+            "a.jd", "a.jd2", "a.strat",
+            "p.spp", "psi.spp",
+            "psi.spp.lake")
+
+na <- 1000; ni <- 10000; nt <- 3; nb <- 1000; nc <- 3 # short for test run
+#na <- 1000; ni <- 60000; nt <- 10; nb <- 10000; nc <- 3
+
+# Call JAGS from R (~44 min at 60,000 ni)
+eDNA1.out <- jags(jags.data.temp, inits = NULL, params, "eDNA_occ.txt", 
+                  n.adapt = na, n.chains = nc, n.thin = nt, 
+                  n.iter = ni, n.burnin = nb, parallel = TRUE)
+print(eDNA1.out, dig = 2)
+mcmcOutput::diagPlot(eDNA1.out)
+
+par(mfrow = c(2,2))
+# crayfish = red
+plot(density(eDNA1.out$sims.list$b.depth[,1]), xlim = c(-1,1), 
+     xlab = "Parameter estimate", main = "Depth effect")
+abline(v = eDNA1.out$mean$b.depth[1], col = "red")
+plot(density(eDNA1.out$sims.list$b.depth[,2]), xlim = c(-1,1), 
+     xlab = "Parameter estimate", main = "Depth effect")
+abline(v = eDNA1.out$mean$b.depth[2], col = "green")
+plot(density(eDNA1.out$sims.list$a.jd[,1]), xlim = c(-1,2), 
+     xlab = "Parameter estimate", main = "Julian day effect")
+abline(v = eDNA1.out$mean$a.jd[1], col = "red")
+plot(density(eDNA1.out$sims.list$a.jd[,2]), xlim = c(-1,2), 
+     xlab = "Parameter estimate", main = "Julian day effect")
+abline(v = eDNA1.out$mean$a.jd[2], col = "green")
+
+par(mfrow = c(2,2))
+# crayfish = red
+plot(density(eDNA1.out$sims.list$a.strat[,1]), xlim = c(-3,3), 
+     xlab = "Parameter estimate", main = "Depth effect")
+abline(v = eDNA1.out$mean$a.strat[1], col = "red")
+plot(density(eDNA1.out$sims.list$a.strat[,2]), xlim = c(-3,3), 
+     xlab = "Parameter estimate", main = "Depth effect")
+abline(v = eDNA1.out$mean$a.strat[2], col = "green")
+
+
+par(mfrow = c(1,2))
+plot(density(eDNA1.out$sims.list$psi.spp.lake.sd), xlim = c(0,2), 
+     xlab = "Parameter estimate", main = "Species-lake effect")
+abline(v = eDNA1.out$meanspp_lake.sd, col = "red")
+
+plot(density(eDNA1.out$sims.list$psi.lake.sd), xlim = c(0,1), 
+     xlab = "Parameter estimate", main = "Lake effect")
+abline(v = eDNA1.out$meanlake.sd, col = "red")
+
+# Occupancy probability for each species by lake
+plot(1:n.lakes, plogis(eDNA1.out$mean$psi.spp[1] + eDNA1.out$mean$psi.spp.lake[1,]), 
+     pch = 19, type = 'b', ylim = c(0,1), ylab = "Detection probability", 
+     xlab = "Lake number", main = "Model estimates")
+for (i in 2:n.spp){
+  points(1:n.lakes, plogis(eDNA1.out$mean$psi.spp[i] + eDNA1.out$mean$psi.spp.lake[i,]), 
+       pch = 19, type = 'b', col = i) 
+}
+
+
+
+eDNA1.out$mean$p.spp.lake.site[1,,1] # Species 1, site 1
+eDNA1.out$mean$p.spp.lake.site[1,1,] # Species 1, lake 1
+
+
+tidy.output <- data.frame(mean = numeric(), spp = numeric(), lake = numeric(), site = numeric())
+num = 1
+for (i in 1:n.spp){
+  for (j in 1:n.lakes){
+    for (k in 1:n.sites){
+      tidy.output[num,] <- data.frame(mean = eDNA1.out$mean$psi.spp.lake.site[i,j,k], 
+                                      spp = i, lake = j, site = k)
+      num = num + 1
+    }
+  }
+}
+
+
+tidy.output %>% 
+  mutate(prob.mean = plogis(mean), ssp = as.factor(spp), lake = as.factor(lake), site = as.factor(site)) %>%
+  ggplot(aes(x = site, y = prob.mean, color = lake, group = lake)) +
+  #geom_point() +
+  geom_line() +
+  facet_wrap(vars(spp))
+ggsave("jags.site.variability.png")
+
+
+# plot depth effect over time 
+range(contamination$depth_m, na.rm = T)
+depth_pred <- seq(1, 80, by = 0.5)
+log_depth_pred <- log(depth_pred)
+depth.standard <- wiqid::standardize2match(log_depth_pred, depths)
+
+depthplot <- matrix(NA, 80*n.spp, 3)
+
+depthplot <- data.frame( depth =  rep(depth_pred, n.spp),
+                     depth.standard = rep(depth.standard, n.spp), 
+                     depth.standard2 = rep(depth.standard^2, n.spp),
+                     mean = rep(NA, length(depth.standard)*2), 
+                     high = rep(NA, length(depth.standard)*2), 
+                     low = rep(NA, length(depth.standard)*2), 
+                     spp = as.factor(c(rep(1, length(depth.standard)), rep(2, length(depth.standard)))))
+
+for (i in 1:nrow(depthplot)) {
+  s = depthplot[i,7]
+  # I should be adding an intercept here?
+  logit.p.tmp <- eDNA1.out$sims.list$b.depth[,s] * depthplot$depth.standard[i] + eDNA1.out$sims.list$psi.spp[,s]
+    
+    #with(eDNA1.out$sims.list, b.jd * dates.standard[i] + b.jd2 * dates.standard[i]^2)
+  p.tmp <- plogis(logit.p.tmp)
+  depthplot[i, 4] <- mean(p.tmp)
+  depthplot[i, 5:6] <- HDInterval::hdi(p.tmp)
+}
+
+depthplot %>%
+  ggplot(aes(x = depth, y = mean, color = spp)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = low, ymax = high, fill = spp), alpha = 0.2)
+#ggsave("jags.deptheffect.png")
+
+
+
+range(contamination$julian_day)
+dates_pred <- seq(105, 300)
+dates.standard <- wiqid::standardize2match(dates_pred, dates)
+
+#jdplot <- matrix(NA, 196*n.spp, 3)
+
+jdplot <- data.frame(dates =  rep(dates_pred, n.spp),
+                     dates.standard = rep(dates.standard, n.spp), 
+                     dates.standard2 = rep(dates.standard^2, n.spp),
+                     mean = rep(NA, length(dates_pred)*2), 
+                     high = rep(NA, length(dates_pred)*2), low = rep(NA, length(dates_pred)*2), 
+                     spp = as.factor(c(rep(1, length(dates_pred)), rep(2, length(dates_pred)))))
+
+for (i in 1:nrow(jdplot)) {
+  s = jdplot[i,7]
+  # I should be adding an intercept here?
+  logit.p.tmp <- eDNA1.out$sims.list$a.jd[,s] * jdplot$dates.standard[i] + 
+      eDNA1.out$sims.list$a.jd2[,s] * jdplot$dates.standard2[i] +
+    eDNA1.out$sims.list$p.spp[,2,s]
+  
+  p.tmp <- plogis(logit.p.tmp)
+  jdplot[i, 4] <- mean(p.tmp)
+  jdplot[i, 5:6] <- HDInterval::hdi(p.tmp)
+}
+
+jdplot <- jdplot %>%
+  mutate(species = case_when(
+    spp == 1 ~ "RC",
+    spp == 2 ~ "CC")) %>% 
+  mutate(samples = detect.likeli(mean, .99),
+                  samples.low = detect.likeli(low, .99),
+                  samples.high = detect.likeli(high, .99))
+
+jdplot %>%
+  ggplot(aes(x = dates, y = mean, color = species)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = low, ymax = high, x = dates, fill = species), alpha = 0.2) +
+  labs(y = "Detection probability", x = "Julian day") +
+  guides(color = "none", fill = guide_legend("Species"))
+
+#ggsave("jags.juliandayeffect.png")
+
+jdplot %>% 
+  ggplot(aes(x = dates, y = samples, color = species)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = samples.low, ymax = samples.high, fill = species), alpha = 0.2) +
+  labs(y = "Number of samples required to get a \n95% Probability of detection", x = "Julian day") + 
+  guides(color="none", fill = guide_legend("Species"))
+  
+plogis(eDNA1.out$mean$p.spp)
+
+#p.spp[species, stratified = 1]
+
+stratplot <- data.frame(
+                     mean = rep(NA, n.spp)*2, 
+                     high = rep(NA, n.spp*2), low = rep(NA, n.spp*2), 
+                     species = as.factor(c(rep(1, n.spp), rep(2, n.spp))),
+                     spp = as.factor(c(rep("RC", n.spp), rep("CC", n.spp))),
+                     status = as.factor(c("Stratified", "Mixed")),
+                     strat = as.factor(c(1, 2)))
+for (i in 1:nrow(stratplot)){
+  logit.p.strat.spp <- eDNA1.out$sims.list$p.spp[, stratplot$species[i], stratplot$strat[i]]
+  p.tmp <- plogis(logit.p.strat.spp)
+  stratplot[i, 1] <- mean(p.tmp)
+  stratplot[i, 2:3] <- HDInterval::hdi(p.tmp)
+}
+
+stratplot %>%
+  ggplot() +
+  geom_boxplot(aes(x = status, y = mean, fill = spp))
+
+
+```
+
+
+```{r}
+Sys.setenv(JAGS_HOME = 'C:/Program Files')
+library(jagsUI)
+
+lakes = c("BDG", "BEN", "CLR", "FLF", "FST", "ILR", "KAB", "LEH", "MIL", "OWA", "OWS",
+                "PHN", "PKE", "PRO", "SHG", "TEN", "VER", "WHB")
+species = c("common carp", "Crayfish")
+n.lakes <- as.numeric(length(unique(data4jags$Code)))
+n.sites <- 10
+n.spp <- 2
+unique.sites <- n.lakes*10
+
+# these are the lakes with all 5 PCR visits
+data4jags <- contamination %>% 
+  mutate(julian_day_2 = julian_day^2) %>%
+  dplyr::filter(contaminated == 0) %>%
+  mutate(stratified = ifelse(stratified == T, 1, 0)) %>%
+  dplyr::filter(
+    Code %in% c("BDG", "BEN", "CLR", "FLF", "FST", "ILR", "KAB", "LEH", "MIL", "OWA", "OWS",
+                "PHN", "PKE", "PRO", "SHG", "TEN", "VER", "WHB")) %>%
+  dplyr::filter(target %in% c("common carp", "Crayfish")) %>%
+  relocate(Code, UID, visit_number, sample, target, pcr_1, pcr_2, pcr_3, 
+           depth_m, area_acres, julian_day, julian_day_2, stratified, contaminated) 
+
+ 
+y.cc = data.frame(Code = rep(lakes, each = 10), sample = rep(1:10, times = 18),
+               CC_1 = NA, CC_2 = NA, CC_3 = NA, 
+               CC_4 = NA, CC_5 = NA)
+y.rc = data.frame(Code = rep(lakes, each = 10), sample = rep(1:10, times = 18),
+               RC_1 = NA, RC_2 = NA, RC_3 = NA, 
+               RC_4 = NA, RC_5 = NA)
+
+
+
+for (s in 1:length(species)) {
+  for (l in 1:length(lakes)) {
+    crayfish_lake = data4jags %>% dplyr::filter(Code == lakes[l] & target == species[s]) %>%
+      arrange(visit_number)
+    visits = 1:5
+    for (v in 1:length(visits)){
+      for (num in 1:10){
+        temp = crayfish_lake %>% dplyr::filter(visit_number == visits[v] & sample == num) %>%
+          select(numdetection)
+        if (nrow(temp) == 0){
+          temp = NA
+        }
+        if (species[s] == "common carp"){
+          y.cc[y.cc$Code == lakes[l] & y.cc$sample == num, v + 2] = temp
+        } else{
+          y.rc[y.rc$Code == lakes[l] & y.rc$sample == num, v + 2] = temp
+        }
+      }
+    }
+  }
+}
+y = list(rc = y.rc, cc = y.cc)
+
+carp_visits <- data4jags %>%
+  dplyr::filter(target == "common carp") %>%
+  distinct(Code, target, visit_number, sample) %>%
+  count(Code, sample) %>% 
+  arrange(Code) %>%
+  rename(n.cc = n)
+crayfish_visits <- data4jags %>%
+  dplyr::filter(target == "Crayfish") %>%
+  distinct(Code, target, visit_number, sample) %>%
+  count(Code, sample) %>% 
+  arrange(Code) %>%
+  rename(n.rc = n)
+
+visits = cbind(crayfish_visits[,3], carp_visits[,3])
+
+occupancy <- matrix( c(1,1,
+                       1,1,
+                       1,1,
+                       0,0,
+                       1,1,
+                       0,0,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       1,1,
+                       0,0,
+                       1,1,
+                       1,1,
+                       1,0,
+                       1,1,
+                       1,1), ncol = 2, byrow = T)
+occupancy = occupancy[rep(seq_len(nrow(occupancy)), each = 10), ]
+
+jd = jd.data[rep(seq_len(nrow(jd.data)), each = 10), ]
+jd2 = jd2.data[rep(seq_len(nrow(jd.data)), each = 10), ]
+
+# covraiate for depth
+depth.data <- data4jags %>% group_by(Code, visit_site) %>%
+  mutate(site_depth_m = mean(depth_m)) %>%
+  distinct(Code, visit_site, site_depth_m) %>%
+  pivot_wider(names_from = "visit_site", values_from = site_depth_m) %>%
+  remove_rownames %>% column_to_rownames(var = "Code")
+# covariate for julian day
+
+area.acres <- data4jags %>% group_by(Code) %>%
+  dplyr::select(area_acres) %>%
+  distinct(Code, area_acres) %>%
+  pivot_wider(names_from = "Code", values_from = area_acres) 
+
+
+species <- data4jags %>% mutate(species = ifelse(target == "Crayfish", 1, 2)) %>%
+  dplyr::select(species)
+
+lake <- data4jags %>% ungroup() %>% mutate(lake_number =
+  case_when(
+  Code == "BDG" ~ 1, 
+  Code == "BEN" ~ 2,
+  Code == "CLR" ~ 3,
+  Code == "FLF" ~ 4,
+  Code == "FST" ~ 5,
+  Code == "ILR" ~ 6,
+  Code == "KAB" ~ 7,
+  Code == "LEH" ~ 8,
+  Code == "MIL" ~ 9,
+  Code == "OWA" ~ 10,
+  Code == "OWS" ~ 11,
+  Code == "PHN" ~ 12,
+  Code == "PKE" ~ 13,
+  Code == "PRO" ~ 14,
+  Code == "SHG" ~ 15,
+  Code == "TEN" ~ 16,
+  Code == "VER" ~ 17,
+  Code == "WHB" ~ 18)) %>% dplyr::select(lake_number)
+
+z.site.rc <- ifelse(rowSums(y.rc[3:7], na.rm = T) > 0, 1, NA)
+
+# run the model for each of the species
+jags.data.rc <- list(y = y.rc[3:7], 
+                       zsite = z.site.rc,
+                       unique.sites = 180,
+                       n.samples = crayfish_visits[,3],
+                       occupancy = occupancy[,1],
+                       jd = jd, jd2 = jd2)
+
+sink("eDNA.site.txt")
+cat("
+model {
+#priors
+  p.spp ~ dnorm(0, 1.75)
+  theta0 ~ dbeta(1,1)
+  a.jd ~ dnorm(0, 1.75) 
+  a.jd.2 ~ dnorm(0, 1.75) 
+  
+  for (i in 1:unique.sites){
+    # Biological
+    theta[i] ~ dbern(theta0)
+    zsite[i] ~ dbern(theta[i]*occupancy[i])
+      
+    for (j in 1:n.samples[i,]){
+    # Detection
+      logit(p[i,j]) <- p.spp + a.jd * jd[i,j] + a.jd.2 * jd2[i,j]
+      y[i, j] ~ dbern(zsite[i]*p[i,j])
+    }
+  }
+} # end jags model
+",fill = TRUE)  # back to R code
+sink()
+
+params <- c("theta0", "p.spp", "a.jd", "a.jd.2")
+
+na <- 1000; ni <- 10000; nt <- 3; nb <- 1000; nc <- 3 # short for test run
+
+
+# Call JAGS from R (~44 min at 60,000 ni)
+eDNA1.out <- jags(jags.data.rc, inits = NULL, params, "eDNA.site.txt", 
+                  n.adapt = na, n.chains = nc, n.thin = nt, 
+                  n.iter = ni, n.burnin = nb, parallel = TRUE)
+
+print(eDNA1.out, dig = 2)
+mcmcOutput::diagPlot(eDNA1.out)
+
+plogis(eDNA1.out$mean$p.spp)
+
+```
 
 
 # UBMS occupancy model
@@ -1053,8 +1659,6 @@ y_stack <- y_stack %>%
 
 sum(y_stack$rowsums)
 ```
-
-
 
 
 ```{r crosshabitat, warning = F}
